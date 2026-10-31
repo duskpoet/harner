@@ -38,6 +38,7 @@ end
 ---@field description string
 ---@field inputSchema table
 ---@field async boolean|nil
+---@field enabled (fun():boolean)|nil opt-in tools: listed and callable only while it returns true
 ---@field handler fun(args:table, resolve:fun(text:string, is_error:boolean|nil)|nil):string|nil
 
 ---@type table<string, HarnerTool>
@@ -448,22 +449,25 @@ end
 
 -- Approvals granted with `a` in a confirm, per chat session (a new chat starts
 -- asking again). Without a chat (tests) they live here.
-local fallback_grants = { writes = false, commands = {} }
+local function new_grants()
+	return { writes = false, commands = {}, shell = {} }
+end
+local fallback_grants = new_grants()
 
----@return { writes: boolean, commands: table<string, true> }
+---@return { writes: boolean, commands: table<string, true>, shell: table<string, true> }
 local function grants()
 	local chat = require("harner.chat")
 	local c = chat.current and chat.chats[chat.current]
 	if not c then
 		return fallback_grants
 	end
-	c.grants = c.grants or { writes = false, commands = {} }
+	c.grants = c.grants or new_grants()
 	return c.grants
 end
 
 ---Forget every `a` approval (tests; a new chat gets fresh grants anyway).
 function M.reset_grants()
-	fallback_grants = { writes = false, commands = {} }
+	fallback_grants = new_grants()
 	local chat = require("harner.chat")
 	for _, c in pairs(chat.chats) do
 		c.grants = nil
@@ -505,7 +509,8 @@ end
 M.tools.run_command = {
 	description = "Run a Neovim Ex command (without the leading colon) in the user's working window and return its "
 		.. "output. Unless the command is on the user's allow-list they are asked to confirm it first. Good for "
-		.. "editor actions (:Git blame, :Telescope, :copen), not a shell: there is no Bash here.",
+		.. "editor actions (:Git blame, :Telescope, :copen), not a shell: shell commands go through the bash tool "
+		.. "when it is enabled.",
 	inputSchema = schema({
 		cmd = { type = "string", description = "Ex command, e.g. `Git blame` or `set list?`" },
 	}, { "cmd" }),
@@ -542,6 +547,236 @@ M.tools.run_command = {
 				run()
 			else
 				resolve("The user declined to run `:" .. cmd .. "`.", true)
+			end
+		end)
+	end,
+}
+
+-- ---------------------------------------------------------------------------
+-- bash: shell commands, opt-in (config.bash.enabled) and confirmed like
+-- run_command. Each runs in its own process group so a cancel, a timeout or
+-- the end of the run kills the whole pipeline, not just the shell.
+
+-- Shell processes still running, by pending call id.
+---@type table<integer, vim.SystemObj>
+local running = {}
+
+local function bash_cfg()
+	return require("harner").config.bash
+end
+
+-- How long a killed command gets to exit on SIGTERM before SIGKILL.
+local KILL_GRACE_MS = 2000
+
+---Signal the process group led by `proc`, or just `proc` if that fails.
+---@param proc vim.SystemObj
+---@param sig string
+local function signal_group(proc, sig)
+	if proc.pid and vim.uv.kill(-proc.pid, sig) == 0 then
+		return
+	end
+	pcall(proc.kill, proc, sig)
+end
+
+---True while any process of the group led by `proc` exists.
+---@param proc vim.SystemObj
+local function group_alive(proc)
+	return proc.pid ~= nil and vim.uv.kill(-proc.pid, 0) == 0
+end
+
+---SIGTERM the group, then SIGKILL whatever ignored it after `grace_ms`.
+---@param proc vim.SystemObj
+---@param grace_ms integer|nil nil: TERM only (the caller escalates itself)
+local function kill_group(proc, grace_ms)
+	signal_group(proc, "sigterm")
+	if grace_ms then
+		vim.defer_fn(function()
+			if group_alive(proc) then
+				signal_group(proc, "sigkill")
+			end
+		end, grace_ms)
+	end
+end
+
+---True when `cmd` may run without asking: confirm is off, the user allowed
+---exactly this command for the chat, or it starts with an `allow` entry
+---(whole words) and has no shell operators that could chain or redirect
+---another command onto it.
+---@param cmd string
+local function bash_allowed(cmd)
+	local cfg = bash_cfg()
+	if not cfg.confirm or grants().shell[cmd] then
+		return true
+	end
+	if cmd:find("[;&|<>$`\\\n(){}]") then
+		return false
+	end
+	for _, entry in ipairs(cfg.allow or {}) do
+		if cmd == entry or vim.startswith(cmd, entry .. " ") then
+			return true
+		end
+	end
+	return false
+end
+
+---Cut `s` to at most `max` bytes, keeping head and tail on UTF-8 boundaries.
+local function truncate_middle(s, max)
+	if #s <= max then
+		return s
+	end
+	local half = math.floor(max / 2)
+	local head_end, tail_start = half, #s - half + 1
+	while head_end > 0 and s:byte(head_end + 1) and s:byte(head_end + 1) >= 0x80 and s:byte(head_end + 1) < 0xC0 do
+		head_end = head_end - 1
+	end
+	while tail_start <= #s and s:byte(tail_start) >= 0x80 and s:byte(tail_start) < 0xC0 do
+		tail_start = tail_start + 1
+	end
+	return s:sub(1, head_end)
+		.. string.format("\n… [%d bytes cut] …\n", tail_start - head_end - 1)
+		.. s:sub(tail_start)
+end
+
+---Tool result for a finished shell command.
+---@param r vim.SystemCompleted
+---@param timed_out boolean
+---@param timeout_s integer
+---@return string text, boolean is_error
+local function bash_result(r, timed_out, timeout_s)
+	local parts = {}
+	local out = (r.stdout or ""):gsub("\n+$", "")
+	local err = (r.stderr or ""):gsub("\n+$", "")
+	if out ~= "" then
+		parts[#parts + 1] = out
+	end
+	if err ~= "" then
+		parts[#parts + 1] = "[stderr]\n" .. err
+	end
+	local failed = timed_out or r.code ~= 0 or (r.signal or 0) ~= 0
+	if timed_out then
+		parts[#parts + 1] = string.format("[timed out after %d s, killed]", timeout_s)
+	elseif (r.signal or 0) ~= 0 then
+		parts[#parts + 1] = "[killed by signal " .. r.signal .. "]"
+	elseif r.code ~= 0 then
+		parts[#parts + 1] = "[exit code " .. r.code .. "]"
+	end
+	if #parts == 0 then
+		return "(no output, exit code 0)", false
+	end
+	return truncate_middle(table.concat(parts, "\n"), bash_cfg().max_output or 30000), failed
+end
+
+---Start `cmd` and resolve with its output when it exits or times out.
+---@param id integer|nil pending call id (for cancel)
+---@param cmd string
+---@param timeout_s integer
+---@param resolve fun(text:string, is_error:boolean|nil)
+local function run_shell(id, cmd, timeout_s, resolve)
+	local done, timed_out = false, false
+	local function finish(text, is_error)
+		if done then
+			return
+		end
+		done = true
+		if id then
+			running[id] = nil
+		end
+		resolve(text, is_error)
+	end
+	local shell = bash_cfg().shell or "bash"
+	local ok, proc = pcall(vim.system, { shell, "-c", cmd }, {
+		cwd = vim.fn.getcwd(),
+		text = true,
+		detach = true, -- own process group, see kill_group
+		env = {
+			GIT_TERMINAL_PROMPT = "0",
+			GH_PROMPT_DISABLED = "1",
+			PAGER = "cat",
+			GIT_PAGER = "cat",
+			-- no TTY: an editor would hang until the timeout, so make it fail fast
+			EDITOR = "false",
+			VISUAL = "false",
+			GIT_EDITOR = "false",
+		},
+	}, function(r)
+		vim.schedule(function()
+			finish(bash_result(r, timed_out, timeout_s))
+		end)
+	end)
+	if not ok then
+		finish("Could not start `" .. shell .. "`: " .. tostring(proc), true)
+		return
+	end
+	if id then
+		running[id] = proc
+	end
+	vim.defer_fn(function()
+		if done then
+			return
+		end
+		timed_out = true
+		kill_group(proc, KILL_GRACE_MS)
+		-- a child that escaped the group may hold the pipes open
+		vim.defer_fn(function()
+			finish(string.format("[timed out after %d s, killed; output unavailable]", timeout_s), true)
+		end, KILL_GRACE_MS + 500)
+	end, timeout_s * 1000)
+end
+
+M.tools.bash = {
+	enabled = function()
+		return bash_cfg().enabled == true
+	end,
+	description = "Run a shell command (`bash -c`) in the user's working directory and return its stdout, stderr "
+		.. "and exit code. The user confirms each command unless it is on their allow-list, so run one focused "
+		.. "command per call rather than long chains. There is no stdin or TTY: interactive prompts fail and editors are "
+		.. "set to `false`, so pass non-interactive flags (`git commit -m`, no `rebase -i`). Every call starts a fresh shell (cd and exported variables do not persist). "
+		.. "Use it for git, gh, builds, tests and linters; read files with Read/Grep/Glob and change them with "
+		.. "edit_file/write_file, not with shell commands.",
+	inputSchema = schema({
+		command = { type = "string", description = "The command to run" },
+		description = {
+			type = "string",
+			description = "Short note on what the command does, shown to the user when confirming",
+		},
+		timeout = { type = "integer", description = "Seconds before the command is killed (default 120, max 540)" },
+	}, { "command" }),
+	async = true,
+	handler = function(args, resolve)
+		local id = calling
+		local cmd = vim.trim(type(args.command) == "string" and args.command or "")
+		if cmd == "" then
+			error("command is required", 0)
+		end
+		-- 540 s keeps the command itself under the bridge's 10 min. The bridge
+		-- clock starts at tools/call, so a long confirm wait plus a long command
+		-- can still hit the bridge timeout, which cancels the call and kills it.
+		local timeout = math.floor(math.min(math.max(tonumber(args.timeout) or bash_cfg().timeout or 120, 1), 540))
+		local function run()
+			run_shell(id, cmd, timeout, resolve)
+		end
+		if bash_allowed(cmd) then
+			run()
+			return
+		end
+		local body = vim.split(cmd, "\n", { plain = true })
+		if type(args.description) == "string" and args.description ~= "" then
+			table.insert(body, 1, "# " .. args.description:gsub("\n", " "))
+		end
+		ask({
+			title = "harner: Claude wants to run in the shell",
+			body = body,
+			filetype = "sh",
+			yes = "run",
+			always = "always run this command in this chat",
+		}, function(choice)
+			if choice == "always" then
+				grants().shell[cmd] = true
+			end
+			if choice ~= "no" then
+				run()
+			else
+				resolve("The user declined to run `" .. cmd .. "`.", true)
 			end
 		end)
 	end,
@@ -1075,11 +1310,19 @@ M.tools.save_file = {
 	end,
 }
 
+---False for opt-in tools the config leaves off (they are not listed or callable).
+---@param t HarnerTool
+local function available(t)
+	return not t.enabled or t.enabled()
+end
+
 ---MCP tools/list payload
 function M.list()
 	local out = {}
 	for name, t in pairs(M.tools) do
-		table.insert(out, { name = name, description = t.description, inputSchema = t.inputSchema })
+		if available(t) then
+			table.insert(out, { name = name, description = t.description, inputSchema = t.inputSchema })
+		end
 	end
 	table.sort(out, function(a, b)
 		return a.name < b.name
@@ -1105,6 +1348,9 @@ function M.call(name, args)
 	local t = M.tools[name]
 	if not t then
 		return text_result("unknown tool: " .. tostring(name), true)
+	end
+	if not available(t) then
+		return text_result("tool " .. name .. " is disabled in the harner config", true)
 	end
 	if t.async then
 		pending_seq = pending_seq + 1
@@ -1176,6 +1422,43 @@ function M.cancel_pending(reason, id)
 	for _, k in ipairs(id and { id } or vim.tbl_keys(asking)) do
 		if asking[k] then
 			asking[k]("no")
+		end
+	end
+	-- and a shell command must not keep running after its call ended
+	M.kill_running(id)
+end
+
+---Kill the process group of every (or one) running bash command: SIGTERM,
+---SIGKILL after a grace period. Also run on VimLeavePre (`exiting`): the
+---groups are detached and would outlive nvim, and timers no longer fire, so
+---it waits up to 200 ms for them to exit and SIGKILLs the rest right away.
+---@param id integer|nil
+---@param exiting boolean|nil
+function M.kill_running(id, exiting)
+	local procs = {}
+	for _, k in ipairs(id and { id } or vim.tbl_keys(running)) do
+		if running[k] then
+			procs[#procs + 1] = running[k]
+			running[k] = nil
+		end
+	end
+	for _, p in ipairs(procs) do
+		kill_group(p, not exiting and KILL_GRACE_MS or nil)
+	end
+	if exiting and #procs > 0 then
+		local function all_gone()
+			for _, p in ipairs(procs) do
+				if group_alive(p) then
+					return false
+				end
+			end
+			return true
+		end
+		vim.wait(200, all_gone, 20)
+		for _, p in ipairs(procs) do
+			if group_alive(p) then
+				signal_group(p, "sigkill")
+			end
 		end
 	end
 end

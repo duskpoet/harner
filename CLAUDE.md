@@ -116,7 +116,40 @@ All modules live in `lua/harner/`:
 Tools today: `show_text`, `open_file` (display); `get_current_buffer`,
 `get_cursor`, `get_selection`, `list_buffers`, `get_diagnostics` (read
 context); `ask_user`, `run_command`, `write_file`, `save_file`, `edit_file`
-(async, may wait on the user; `edit_file` resolves at once unless it asks).
+(async, may wait on the user; `edit_file` resolves at once unless it asks);
+`bash` (async, opt-in).
+
+A tool with an `enabled()` field is opt-in: `list()` omits it and `call()`
+refuses it while that returns false. `bash` is the only one
+(`config.bash.enabled`, default off). It runs `<shell> -c <command>` with
+`vim.system` (`detach = true`, so the shell leads its own process group) in
+`getcwd()`, no stdin, prompts disabled via env (`GIT_TERMINAL_PROMPT=0`,
+`GH_PROMPT_DISABLED=1`, `PAGER=cat`, `GIT_PAGER=cat`) and editors set to
+`false` (`EDITOR`, `VISUAL`, `GIT_EDITOR`), so `git commit` without `-m` or
+`git rebase -i` fails at once instead of hanging until the timeout. Confirmed through `confirm.lua` unless
+`config.bash.confirm = false`, the exact command is granted for the chat
+(`grants().shell`), or it starts with a `config.bash.allow` entry (whole
+words) *and* contains none of `` ; & | < > $ ` \ ( ) { } `` or a newline:
+prefix allow-listing a shell command is only safe without operators, and
+even then the allowed program's own arguments are unchecked (`git -c
+alias.x='!cmd' x`, `git diff --output=FILE`), so the docs tell users to
+allow-list specific read-only subcommands only. Running
+processes sit in `running[id]`; `cancel_pending` kills their process group
+(`kill(-pid)` via `kill_running`, which a `VimLeavePre` autocmd also calls
+since detached groups outlive nvim), as does the timeout (`timeout` arg,
+default `config.bash.timeout`, capped at 540 s so the command itself fits
+in the bridge's 10 min; the bridge clock starts at `tools/call`, so a long
+confirm wait can still hit the bridge timeout, which cancels the call and
+kills the command). Killing is SIGTERM, then SIGKILL after `KILL_GRACE_MS` (2 s) if the
+group is still alive; on `VimLeavePre` timers no longer fire, so it waits up
+to 200 ms and SIGKILLs the rest at once. bash_test runs the work in a
+background subshell (`(sleep N; touch marker) & wait`) so the checks fail if
+only the shell dies.
+The result is stdout, `[stderr]` + stderr, and `[exit code N]` /
+`[timed out ...]` (non-zero is `isError`), middle-truncated to
+`config.bash.max_output` bytes on UTF-8 boundaries. `mcp.shell_note()` puts
+either bash usage or, when off, "say up front that this needs a shell" into
+the system note, so shell-dependent skills fail early instead of midway.
 
 Editing follows the `str_replace` shape the models are trained on: `edit_file`
 takes `path`, `old_str`, `new_str`, optional `replace_all`. It loads the file
@@ -168,7 +201,8 @@ paragraph.
 
 Headless Claude silently denies anything not pre-approved. We pass
 `--tools Read,Grep,Glob,WebFetch` (restricts the built-in set, so no Edit /
-Write / Bash exist at all) and `--allowedTools Read,Grep,Glob,WebFetch,mcp__nvim`
+Write / Bash exist at all; shell access is only the confirmed, opt-in
+`mcp__nvim__bash`) and `--allowedTools Read,Grep,Glob,WebFetch,mcp__nvim`
 (`mcp__nvim` approves every tool of the server named `nvim`). The server name in
 `mcp.lua` and the allow-list entry must stay in sync. File changes only happen
 through the nvim tools: `edit_file` lands in the buffer unsaved, disk writes
@@ -234,6 +268,10 @@ nvim --headless -u NONE -l tests/prompt_test.lua
 # cancel closing a confirm, edits reusing one window instead of splitting,
 # edit_file's save/drop prompt on a buffer with the user's unsaved changes
 nvim --headless -u NONE -l tests/confirm_test.lua
+
+# bash tool: opt-in listing, allow-list vs operators, confirm / decline /
+# grant, stderr + exit code, truncation, timeout and cancel killing the group
+nvim --headless -u NONE -l tests/bash_test.lua
 
 # runner + chat against a fake `claude` shell script replaying stream events:
 # tool note summaries, cost in the winbar, missing-binary error (offline)

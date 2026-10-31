@@ -34,6 +34,21 @@ M.config = {
 	write_file = {
 		confirm = true,
 	},
+	-- the bash tool: shell commands Claude may run in the working directory.
+	-- Off unless enabled. `confirm` asks before each command unless it starts
+	-- with an `allow` entry (whole words) and contains no shell operators
+	-- (; & | < > $ ` \ ( ) { } or a newline), e.g. allow = { "git status", "gh pr view" }.
+	-- Arguments are not checked: list specific read-only subcommands, never a
+	-- bare program ("git" lets `git -c alias.x='!cmd' x` run anything) or one
+	-- that writes through options (`git diff --output=FILE`) or runs scripts.
+	bash = {
+		enabled = false,
+		confirm = true,
+		allow = {}, ---@type string[]
+		shell = "bash", -- run as `<shell> -c <command>`
+		timeout = 120, -- seconds, when Claude gives none (Claude may ask for up to 540)
+		max_output = 30000, -- bytes returned to Claude; the middle is cut beyond that
+	},
 	-- global normal-mode keymaps; set one to false to skip it
 	keys = {
 		group = "<leader>h", -- which-key group label, false to skip
@@ -99,6 +114,17 @@ function M.setup(opts)
 			vim.keymap.set("n", lhs, rhs, { desc = desc })
 		end
 	end
+	-- bash commands run detached (own session) and would outlive nvim
+	vim.api.nvim_create_autocmd("VimLeavePre", {
+		group = vim.api.nvim_create_augroup("harner", { clear = true }),
+		callback = function()
+			local tools = package.loaded["harner.tools"]
+			if tools then
+				tools.kill_running(nil, true)
+			end
+		end,
+	})
+
 	map(keys.ask, function()
 		prompt().open()
 	end, "Harner: ask (input popup)")

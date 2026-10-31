@@ -72,6 +72,22 @@ A selection is passed by reference, not pasted: the prompt ends with a
   `save_file` takes several files under one confirm)
 - interact: `ask_user` (question with optional choices), `run_command` (an Ex
   command, confirmed unless it starts with an entry of `run_command.allow`)
+- shell (opt-in, `bash = { enabled = true }`): `bash` runs a command with
+  `bash -c` in the working directory and returns stdout, stderr and the exit
+  code. Each command is confirmed unless it starts with an entry of
+  `bash.allow` and contains no shell operators (`;`, `&`, `|`, redirects,
+  `$`, backticks, ...), so `git status; rm -rf ~` never slips through an
+  allowed `git status`. The operator check does not limit what the allowed
+  program does with its own arguments, so keep entries to specific read-only
+  subcommands (`git status`, `git log`, `gh pr view`). A bare program name
+  allows everything it can do (`git -c alias.x='!rm -rf ~' x` passes a
+  `git` entry), as does any entry that writes through options (`git diff
+  --output=FILE`) or runs project scripts (`npm`, `make`, `cargo`). No stdin
+  or TTY; commands are killed (whole process
+  group) on timeout, `<leader>hx` or the end of the reply. This is what
+  shell-dependent skills such as a PR review need. With the tool off, Claude
+  is told to say up front when a task needs a shell instead of stopping
+  partway through.
 
 Commands and disk writes are confirmed in a small float that shows the full
 command or file list: `y` approves, `a` approves and stops asking for the rest
@@ -84,8 +100,9 @@ skips the edit.
 
 Headless Claude silently denies anything not pre-approved. harner restricts
 the built-in tools to `Read`, `Grep`, `Glob` and `WebFetch` and approves the
-`nvim` MCP server, so there is no shell and no direct file write; all changes
-go through the tools above.
+`nvim` MCP server, so there is no built-in shell and no direct file write;
+all changes go through the tools above (shell commands only through the
+confirmed `bash` tool, when you enable it).
 
 ## Configuration
 
@@ -109,6 +126,15 @@ require("harner").setup({
   },
   write_file = {
     confirm = true,       -- ask before write_file / save_file touch the disk
+  },
+  bash = {
+    enabled = false,      -- opt-in shell tool
+    confirm = true,       -- ask before each command not covered by `allow`
+    allow = {},           -- read-only subcommands only, e.g. { "git status", "gh pr view" }
+                          -- (never a bare "git" / "npm": its arguments can run anything)
+    shell = "bash",       -- run as `<shell> -c <command>`
+    timeout = 120,        -- seconds when Claude gives none (max 540)
+    max_output = 30000,   -- bytes returned to Claude, middle cut beyond that
   },
   keys = {                -- set an entry to false to skip it
     group = "<leader>h",  -- which-key group label
@@ -140,9 +166,9 @@ chat.lua ──send──▶ runner.lua ──vim.system──▶ claude -p --ou
 
 The MCP server is `bridge.lua`, started by the CLI with the same `nvim`
 binary in `-l` mode. It forwards every tool call over RPC to the nvim that
-owns the chat, where `tools.lua` runs it. Tools that wait on you (`ask_user`,
-`run_command`, `write_file`, `save_file`) answer asynchronously so the editor
-stays responsive.
+owns the chat, where `tools.lua` runs it. Tools that wait on you or a process
+(`ask_user`, `run_command`, `bash`, `write_file`, `save_file`) answer
+asynchronously so the editor stays responsive.
 
 ## Development
 
@@ -153,6 +179,7 @@ nvim --headless -u NONE -l tests/bridge_test.lua   # MCP round trip, every tool
 nvim --headless -u NONE -l tests/prompt_test.lua   # popup and keymaps
 nvim --headless -u NONE -l tests/confirm_test.lua  # confirm float, grants, window reuse
 nvim --headless -u NONE -l tests/runner_test.lua   # stream parsing against a fake claude
+nvim --headless -u NONE -l tests/bash_test.lua     # opt-in shell tool, allow-list, timeout, cancel
 nvim --headless -u NONE -l tests/chat_test.lua     # real CLI, costs money
 ```
 

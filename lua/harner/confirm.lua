@@ -1,5 +1,5 @@
--- Confirm float for actions Claude asks to take (run_command, write_file,
--- save_file). Unlike vim.ui.select, whose frontends put the prompt in a
+-- Confirm float for actions Claude asks to take (run_command, bash,
+-- write_file, save_file). Unlike vim.ui.select, whose frontends put the prompt in a
 -- one-line title that gets truncated, the full request is shown as wrapped
 -- body text so the user sees exactly what they approve.
 --

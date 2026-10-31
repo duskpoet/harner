@@ -194,6 +194,8 @@ local function tool_summary(name, input)
 		s = input.question
 	elseif n == "nvim:run_command" then
 		s = input.cmd and (":" .. input.cmd) or nil
+	elseif n == "nvim:bash" then
+		s = type(input.command) == "string" and ("$ " .. input.command) or nil
 	elseif n == "Read" or n == "Glob" or n == "Grep" then
 		s = input.file_path or input.pattern
 		if s and n ~= "Read" and input.path then
