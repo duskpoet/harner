@@ -1,2 +1,0 @@
-- setting prompting updating each file doesn't really work, too much manual intervention. Plus opened buffers just crumble into one space
-- when i am asked about approving something, like command execution - the title get truncated and i don't see what actually is being executed

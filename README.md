@@ -68,9 +68,19 @@ A selection is passed by reference, not pasted: the prompt ends with a
 - display: `show_text` (scratch window with a filetype, `q` closes it),
   `open_file` (jump to a file and highlight a line range)
 - change: `edit_file` (str_replace-style edit applied to the buffer, unsaved
-  and undoable), `write_file` and `save_file` (disk writes, confirmed by you)
+  and undoable), `write_file` and `save_file` (disk writes, confirmed by you;
+  `save_file` takes several files under one confirm)
 - interact: `ask_user` (question with optional choices), `run_command` (an Ex
   command, confirmed unless it starts with an entry of `run_command.allow`)
+
+Commands and disk writes are confirmed in a small float that shows the full
+command or file list: `y` approves, `a` approves and stops asking for the rest
+of the chat (that exact command, or all writes), `n` / `<Esc>` skips. Edited
+files are shown in your working window; if it holds unsaved changes of your
+own, harner splits once and reuses that window for every later file. If
+Claude wants to edit a file you have unsaved changes in, it asks first: `s`
+saves your changes and then edits, `d` drops them (reloads from disk), `n`
+skips the edit.
 
 Headless Claude silently denies anything not pre-approved. harner restricts
 the built-in tools to `Read`, `Grep`, `Glob` and `WebFetch` and approves the
@@ -141,6 +151,7 @@ Offline tests, run from the repo root; each ends with `ALL OK`:
 ```sh
 nvim --headless -u NONE -l tests/bridge_test.lua   # MCP round trip, every tool
 nvim --headless -u NONE -l tests/prompt_test.lua   # popup and keymaps
+nvim --headless -u NONE -l tests/confirm_test.lua  # confirm float, grants, window reuse
 nvim --headless -u NONE -l tests/runner_test.lua   # stream parsing against a fake claude
 nvim --headless -u NONE -l tests/chat_test.lua     # real CLI, costs money
 ```

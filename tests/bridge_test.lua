@@ -14,9 +14,33 @@ vim.cmd("cd " .. vim.fn.fnameescape(root))
 local ui_prompts = {}
 vim.ui.select = function(items, opts, cb)
   ui_prompts[#ui_prompts + 1] = opts.prompt
-  vim.defer_fn(function()
-    if opts.prompt:find("decline", 1, true) then cb("skip") else cb(items[1]) end
-  end, 150)
+  vim.defer_fn(function() cb(items[1]) end, 150)
+end
+-- run_command / write_file / save_file confirm through harner.confirm
+local confirm = require("harner.confirm")
+local real_confirm_ask = confirm.ask
+confirm.ask = function(opts, cb)
+  local p = opts.title .. " " .. table.concat(opts.body, " ")
+  ui_prompts[#ui_prompts + 1] = p
+  vim.defer_fn(function() cb(p:find("decline", 1, true) and "no" or "yes") end, 150)
+end
+-- snapshot where open_file / edit_file left the cursor, as each call runs
+-- (later calls may show another file in the same window)
+local shown = {}
+local tools = require("harner.tools")
+for _, name in ipairs({ "open_file", "edit_file" }) do
+  local h = tools.tools[name].handler
+  tools.tools[name].handler = function(args, resolve)
+    local res = h(args, resolve)
+    local win = vim.api.nvim_get_current_win()
+    local buf = vim.api.nvim_win_get_buf(win)
+    shown[#shown + 1] = {
+      name = name, win = win, buf = buf, path = vim.api.nvim_buf_get_name(buf),
+      cursor = vim.api.nvim_win_get_cursor(win)[1],
+      marks = vim.api.nvim_buf_get_extmarks(buf, vim.api.nvim_create_namespace("harner_open_file"), 0, -1, { details = true }),
+    }
+    return res
+  end
 end
 vim.ui.input = function(opts, cb)
   ui_prompts[#ui_prompts + 1] = opts.prompt
@@ -108,13 +132,9 @@ check(is_err(4) and text(4):find("unknown tool", 1, true), "unknown tool is an e
 check(replies[5] and replies[5].error and replies[5].error.code == -32601, "unknown method is a jsonrpc error")
 
 check(text(6) == "Opened lua/harner/mcp.lua, highlighted lines 12-14." and not is_err(6), "open_file: " .. text(6))
-local fwin
-for _, w in ipairs(vim.api.nvim_list_wins()) do
-  if vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(w)):match("mcp%.lua$") then fwin = w end
-end
-check(fwin ~= nil and vim.api.nvim_win_get_cursor(fwin)[1] == 12, "open_file placed the cursor on line 12")
-local ns = vim.api.nvim_create_namespace("harner_open_file")
-local marks = fwin and vim.api.nvim_buf_get_extmarks(vim.api.nvim_win_get_buf(fwin), ns, 0, -1, { details = true }) or {}
+local fshown = vim.tbl_filter(function(x) return x.name == "open_file" end, shown)[1]
+check(fshown and fshown.path:match("mcp%.lua$") and fshown.cursor == 12, "open_file placed the cursor on line 12")
+local marks = fshown and fshown.marks or {}
 check(#marks == 1 and marks[1][2] == 11 and marks[1][4].end_row == 14, "open_file highlighted the range")
 check(is_err(7) and text(7):find("no such file", 1, true), "open_file missing path is an error: " .. text(7))
 
@@ -146,14 +166,12 @@ check(is_err(26) and text(26):find("no such file", 1, true), "edit_file missing 
 check(is_err(34) and text(34):find("not found", 1, true), "edit_file whitespace-only old_str is not found: " .. text(34))
 check(not is_err(35) and disk[13] == "\t\tdeep = false" and disk[14] == "\t\t\tmore = 1", "indentation fallback with a leading blank line keeps the base indent: " .. vim.inspect({ disk[13], disk[14] }))
 check(text(35):find("now lines 12-14, shown in the editor", 1, true) ~= nil, "edit_file reports the shown range: " .. text(35))
-local ewin
-for _, w in ipairs(vim.api.nvim_list_wins()) do
-  if vim.api.nvim_win_get_buf(w) == ebuf then ewin = w end
-end
-check(ewin ~= nil and vim.api.nvim_win_get_cursor(ewin)[1] == 12, "edit_file showed the edited buffer with the cursor on the change")
-local emarks = vim.api.nvim_buf_get_extmarks(ebuf, ns, 0, -1, { details = true })
+local edits = vim.tbl_filter(function(x) return x.name == "edit_file" end, shown)
+local eshown = edits[#edits]
+check(eshown and eshown.buf == ebuf and eshown.cursor == 12, "edit_file showed the edited buffer with the cursor on the change")
+local emarks = eshown and eshown.marks or {}
 check(#emarks == 1 and emarks[1][2] == 11 and emarks[1][4].end_row == 14, "edit_file highlighted the edited lines")
-check(fwin ~= ewin, "open_file split instead of replacing the modified edit buffer")
+check(fshown and eshown and fshown.win == eshown.win, "open_file reused the window of the Claude-edited buffer instead of splitting")
 check(text(27):find("^Saved .*%(14 lines%)") ~= nil and not is_err(27), "save_file wrote the buffer: " .. text(27))
 check(text(28):find("Wrote", 1, true) ~= nil and vim.deep_equal(vim.fn.readfile(tmp .. "/new.txt"), { "a", "b" }), "write_file created new.txt: " .. text(28))
 check(is_err(29) and text(29):find("declined", 1, true) and vim.uv.fs_stat(tmp .. "/decline-me.txt") == nil, "write_file declined leaves no file: " .. text(29))
@@ -167,7 +185,6 @@ check(#write_prompts == 4 and #save_prompts == 1, "confirm asked for 4 writes an
 vim.fn.delete(tmp, "rf")
 
 -- cancel path: a pending ask resolves with an error and poll hands it over
-local tools = require("harner.tools")
 vim.ui.input = function() end -- never answers
 local res = tools.call("ask_user", { question = "stuck?" })
 check(type(res) == "table" and res.pending ~= nil and tools.poll(res.pending) == nil, "async call is pending")

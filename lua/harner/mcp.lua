@@ -51,6 +51,7 @@ function M.system_note(cwd)
 		"To change a file, read it first, then call edit_file with old_str copied exactly from the file (enough lines to be unique) and new_str.",
 		"The number of tokens used to edit files is best minimized, all else being equal. Therefore, when it will not affect the end result, try to surgically edit a file rather than rewrite the entire thing.",
 		"edit_file changes the editor buffer without saving; the user reviews and saves, or call save_file when they ask for the change to be written.",
+		"After editing several files, save them with one save_file call listing them all in `paths` (the user confirms once), not one call per file.",
 		"write_file (confirmed by the user) is for new files or complete rewrites only. There are no shell commands in this mode.",
 		"When only discussing a change, show it with show_text (filetype diff or the language) instead of editing.",
 		"Working directory: " .. cwd,

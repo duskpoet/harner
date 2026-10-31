@@ -5,9 +5,11 @@ Neovim plugin (Lua, requires nvim 0.10+, developed on 0.12) that chats with
 editor and displays content back in it. Standard plugin layout
 (`lua/harner/*.lua`, `tests/`, `README.md`) installed with lazy.nvim: `opts =
 {}` calls `setup()`, which registers the commands and the global keymaps. The
-user's checkout lives at `~/.config/nvim/lua/harner/` and is loaded through a
-`dir =` spec in `~/.config/nvim/lua/plugins.lua` (`event = "VeryLazy"`);
-nothing in the config's own `lua/` tree requires it any more.
+user installs it from GitHub as `duskpoet/harner`, so the working copy is
+lazy.nvim's checkout at `~/.local/share/nvim/lazy/harner/`. The spec in
+`~/.config/nvim/lua/plugins.lua` is `{ 'duskpoet/harner', event = "VeryLazy",
+opts = {} }`; without `opts` lazy never calls `setup()` and no commands or
+keys exist.
 
 One chat session per nvim instance, reachable from any window:
 
@@ -30,7 +32,7 @@ Selection handling is by reference, not by pasting: the popup title shows
 `'<`/`'>` marks of the target window, so the two must stay consistent (the
 visual mapping leaves visual mode first so the marks are set).
 
-Its own git repo (the enclosing `~/.config/nvim` is not one). The interactive
+Its own git repo (`~/.config/nvim` is not one). The interactive
 Claude Code integration is a separate plugin (`coder/claudecode.nvim`); harner
 is only the headless `-p` path.
 
@@ -88,48 +90,72 @@ All modules live in `lua/harner/`:
   When `tools.call` answers `{ pending = id }` the bridge polls
   `tools.poll(id)` every 100 ms (`vim.uv.sleep`) until a result table comes
   back, giving up after 10 min (`cancel_pending` + `isError`).
+- `confirm.lua` — the confirm float for `run_command`, `write_file`,
+  `save_file` and `edit_file`'s save/drop question (not `vim.ui.select`: Telescope truncated the prompt title so
+  the command being approved was invisible). The full request is wrapped body
+  text, keys in the footer: `y`/`<CR>` approve, `a` approve and stop asking
+  (exactly that command, or every write) for the current chat, `n`/`q`/
+  `<Esc>`/`<C-c>` or leaving the float decline; `choices` adds other keys
+  (`edit_file` uses `s` save / `d` drop). Grants live on the chat
+  (`chat.grants`), so `<leader>hn` asks again. `ask()` returns the float's
+  close function; `tools.lua` opens confirms through its local `ask()`, which
+  files them under the running call's id (`asking[id]`), and
+  `cancel_pending()` declines them after marking the calls cancelled (one id
+  on a bridge timeout, all on cancel / run end), so nothing runs or writes
+  after a call ended.
 - `tools.lua` — `M.tools[name] = {description, inputSchema, handler, async?}`.
   `list()` and `call(name, args)` are what the bridge invokes. Sync handlers
   return a string; errors become `isError = true` results. Async handlers
   (`async = true`) get `handler(args, resolve)` and run `vim.ui.select` /
   `vim.ui.input`; `call` returns `{ pending = id }`, `resolve(text, is_error)`
-  stores the result for `poll(id)`. `cancel_pending(reason, [id])` resolves
+  stores the result for `poll(id)`. A handler that resolves before returning
+  (nothing to ask) gets its result returned directly, no polling. `cancel_pending(reason, [id])` resolves
   waiting calls with an error (chat cancel and run end both call it).
   Every finished nvim tool calls `chat.on_tool_done(name)`.
 
 Tools today: `show_text`, `open_file` (display); `get_current_buffer`,
 `get_cursor`, `get_selection`, `list_buffers`, `get_diagnostics` (read
-context); `edit_file` (sync, edits the buffer); `ask_user`, `run_command`,
-`write_file`, `save_file` (async, wait on the user).
+context); `ask_user`, `run_command`, `write_file`, `save_file`, `edit_file`
+(async, may wait on the user; `edit_file` resolves at once unless it asks).
 
 Editing follows the `str_replace` shape the models are trained on: `edit_file`
 takes `path`, `old_str`, `new_str`, optional `replace_all`. It loads the file
 into a (listed, hidden) buffer with `bufadd`/`bufload` and edits it with
 `nvim_buf_set_text`, so the change is unsaved and undoable and LSP sees it.
-After a successful edit the buffer is shown in `target_win()` with the cursor
-on the replaced lines and the same `Visual` highlight as `open_file`
-(`show_range()`, shared by both tools), so the user sees the unsaved change.
+After a successful edit the buffer is shown with the cursor on the replaced
+lines and the same `Visual` highlight as `open_file` (`show_range()`, shared
+by both tools), so the user sees the unsaved change. `display_win()` picks the
+window: one already showing the buffer, else `target_win()`, unless that
+holds unsaved changes the user made themselves; then a single side window is
+split off and reused for every later file. `edited[buf]` holds the
+changedtick after Claude's last edit; while it matches, all unsaved changes
+are Claude's (`claude_owned()`), so the buffer may be hidden (it stays
+listed) and a multi-file edit never splits more than once. When the user
+changes it the tick moves on and it is protected again. If `edit_file`
+targets a buffer that is not `claude_owned`, it asks: `s` saves the user's
+changes first, `d` reloads from disk (`edit!`), skipping fails the call.
 `old_str` must match exactly once (error names the count and asks for more
 context, or "not found, read it again"). When the exact match fails it retries
 whole-line matching ignoring trailing whitespace, then ignoring indentation;
 the latter re-indents `new_str` to the file's style (`reindent()`: tabs or
 `shiftwidth` spaces per level, levels inferred from Claude's own indentation).
 The result text says which fallback matched. `write_file` (`path`, `content`,
-`create_dirs`) replaces or creates a whole file and `save_file` (`path`)
-writes a modified buffer; both ask through `vim.ui.select({"write"|"save",
-"skip"})` unless `config.write_file.confirm = false`. Writes go through the
+`create_dirs`) replaces or creates a whole file and `save_file` (`path` and/or
+`paths`) writes modified buffers under one confirm; both ask through
+`confirm.lua` unless `config.write_file.confirm = false` or the chat has the
+write grant. The system note tells Claude to save several files in one call. Writes go through the
 buffer when one is loaded (`silent write`) so buffer and disk stay in sync,
 otherwise `writefile`. The system note carries Anthropic's "surgically edit a
 file rather than rewrite" line, which matters most on Fable.
 
 `open_file` resolves relative paths against `getcwd()` and calls
-`show_range()`: show the buffer in `target_win()` (`split` first if that window
-holds another modified buffer), centre the line and highlight the range with a
+`show_range()`: show the buffer in the window `display_win()` picks (see
+above), centre the line and highlight the range with a
 `Visual` extmark in the `harner_open_file` namespace that clears once the
 cursor leaves the range. `run_command` runs an Ex command with
 `nvim_exec2` in `target_win()`; unless it starts with an entry of
-`config.run_command.allow` (whole-word prefix match, e.g. `Git log`) the user
-confirms through `vim.ui.select({"run","skip"})`. `config.run_command.confirm
+`config.run_command.allow` (whole-word prefix match, e.g. `Git log`) or
+granted for the chat, the user confirms through `confirm.lua`. `config.run_command.confirm
 = false` skips the prompt for everything.
 
 Tool notes in the transcript are `_→ nvim:show_text_` on `content_block_start`
@@ -172,8 +198,8 @@ through the nvim tools: `edit_file` lands in the buffer unsaved, disk writes
   Drive popup tests through normal-mode keys and `nvim_buf_set_lines`.
 - `vim.o.exrc` is on in the user's config, so a `.nvim.lua` in this directory
   would be sourced when nvim starts here. Do not add one.
-- The user's `vim.ui.select` is telescope-ui-select (ask_user choices and the
-  run_command confirm open a Telescope picker); `vim.ui.input` is the default
+- The user's `vim.ui.select` is telescope-ui-select (ask_user choices open a
+  Telescope picker; confirms use `confirm.lua` instead); `vim.ui.input` is the default
   `input()` cmdline prompt, which blocks the calling `nvim_exec_lua` until
   the user answers (functionally fine, the bridge just waits).
 - To exercise flows with the main loop running (plugins, Telescope, NERDTree),
@@ -190,8 +216,9 @@ Headless, run from the repo root; every offline test ends with `ALL OK`. Each
 test starts by `dofile`-ing `tests/helper.lua`, which derives the repo root
 from its own path and prepends it to the rtp (so the checkout can live
 anywhere) and provides `check(cond, msg)` / `finish()`.
-`vim.ui.select`/`vim.ui.input` are stubbed wherever an async tool is exercised
-(headless nvim has no UI for them):
+`vim.ui.select`/`vim.ui.input` (and `confirm.ask` in bridge_test) are
+stubbed wherever an async tool is exercised; confirm_test drives the real
+float with `feedkeys(..., "x")`:
 
 ```sh
 # bridge round trip: initialize, tools/list, show_text, open_file, ask_user,
@@ -202,6 +229,11 @@ nvim --headless -u NONE -l tests/bridge_test.lua
 
 # popup + <leader>h keymaps, offline; the only test that stubs the runner
 nvim --headless -u NONE -l tests/prompt_test.lua
+
+# confirm float (full text, y/a/n), per-chat grants, multi-path save_file,
+# cancel closing a confirm, edits reusing one window instead of splitting,
+# edit_file's save/drop prompt on a buffer with the user's unsaved changes
+nvim --headless -u NONE -l tests/confirm_test.lua
 
 # runner + chat against a fake `claude` shell script replaying stream events:
 # tool note summaries, cost in the winbar, missing-binary error (offline)

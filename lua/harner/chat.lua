@@ -180,7 +180,16 @@ local function tool_summary(name, input)
 			end
 		end
 	elseif n == "nvim:edit_file" or n == "nvim:write_file" or n == "nvim:save_file" then
-		s = input.path and vim.fn.fnamemodify(input.path, ":t") or nil
+		local paths = {}
+		if type(input.path) == "string" then
+			paths[1] = input.path
+		end
+		if type(input.paths) == "table" then
+			vim.list_extend(paths, input.paths)
+		end
+		s = #paths > 0 and table.concat(vim.tbl_map(function(p)
+			return vim.fn.fnamemodify(tostring(p), ":t")
+		end, paths), ", ") or nil
 	elseif n == "nvim:ask_user" then
 		s = input.question
 	elseif n == "nvim:run_command" then

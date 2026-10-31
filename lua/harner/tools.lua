@@ -143,21 +143,62 @@ local function load_buf(path)
 	return buf
 end
 
----Show `buf` in the target window (splitting first when that window holds
----another modified buffer), centre the cursor on `first` and highlight
----`first`-`last` until the cursor leaves the range.
+-- Buffers changed by edit_file: their changedtick right after Claude's last
+-- edit. While it still matches, every unsaved change in the buffer is
+-- Claude's, so showing another file may hide it (it stays listed); once the
+-- user changes it the tick moves on and their work is protected again.
+---@type table<integer, integer>
+local edited = {}
+
+---True when `buf` has no unsaved changes, or only ones edit_file made.
+---@param buf integer
+local function claude_owned(buf)
+	return not vim.bo[buf].modified or edited[buf] == vim.api.nvim_buf_get_changedtick(buf)
+end
+-- The one window show_range split off to protect such a buffer; reused for
+-- every later file instead of splitting again.
+local side_win = nil ---@type integer|nil
+
+---The window `buf` should be shown in: a window of the current tab already
+---showing it, else the target window, unless that holds unsaved changes the
+---user made themselves; then the side window (split off once and reused).
+---@param buf integer
+---@return integer win
+local function display_win(buf)
+	for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+		if vim.api.nvim_win_get_buf(w) == buf and vim.api.nvim_win_get_config(w).relative == "" then
+			return w
+		end
+	end
+	local win = target_win()
+	if claude_owned(vim.api.nvim_win_get_buf(win)) then
+		return win
+	end
+	if
+		side_win
+		and side_win ~= win
+		and vim.api.nvim_win_is_valid(side_win)
+		and vim.api.nvim_win_get_tabpage(side_win) == vim.api.nvim_get_current_tabpage()
+		and claude_owned(vim.api.nvim_win_get_buf(side_win))
+	then
+		return side_win
+	end
+	vim.api.nvim_set_current_win(win)
+	vim.cmd("split")
+	side_win = vim.api.nvim_get_current_win()
+	return side_win
+end
+
+---Show `buf` (see display_win for which window), centre the cursor on
+---`first` and highlight `first`-`last` until the cursor leaves the range.
 ---@param buf integer
 ---@param first integer 1-based
 ---@param last integer 1-based
 ---@return integer first, integer last clamped to the buffer
 local function show_range(buf, first, last)
-	local win = target_win()
+	local win = display_win(buf)
 	vim.api.nvim_set_current_win(win)
 	if vim.api.nvim_win_get_buf(win) ~= buf then
-		if vim.bo[vim.api.nvim_win_get_buf(win)].modified then
-			vim.cmd("split")
-			win = vim.api.nvim_get_current_win()
-		end
 		vim.api.nvim_win_set_buf(win, buf)
 	end
 	local total = vim.api.nvim_buf_line_count(buf)
@@ -381,11 +422,60 @@ M.tools.ask_user = {
 	end,
 }
 
----True when `cmd` starts with one of the allow-listed commands (whole words).
+-- The async call whose handler is running: confirms it opens belong to it.
+local calling = nil ---@type integer|nil
+-- Close functions of the confirm floats still open, by pending call id.
+---@type table<integer, fun(choice:string)>
+local asking = {}
+
+---confirm.ask for the running async call, remembered so cancel_pending can
+---decline it: a confirm answered after its call was cancelled or timed out
+---must not run or write anything.
+---@param opts HarnerConfirmOpts
+---@param cb fun(choice:string)
+local function ask(opts, cb)
+	local id = calling
+	local close = require("harner.confirm").ask(opts, function(choice)
+		if id then
+			asking[id] = nil
+		end
+		cb(choice)
+	end)
+	if id and close then
+		asking[id] = close
+	end
+end
+
+-- Approvals granted with `a` in a confirm, per chat session (a new chat starts
+-- asking again). Without a chat (tests) they live here.
+local fallback_grants = { writes = false, commands = {} }
+
+---@return { writes: boolean, commands: table<string, true> }
+local function grants()
+	local chat = require("harner.chat")
+	local c = chat.current and chat.chats[chat.current]
+	if not c then
+		return fallback_grants
+	end
+	c.grants = c.grants or { writes = false, commands = {} }
+	return c.grants
+end
+
+---Forget every `a` approval (tests; a new chat gets fresh grants anyway).
+function M.reset_grants()
+	fallback_grants = { writes = false, commands = {} }
+	local chat = require("harner.chat")
+	for _, c in pairs(chat.chats) do
+		c.grants = nil
+	end
+end
+
+---True when `cmd` starts with one of the allow-listed commands (whole words)
+---or the user allowed exactly this command for the chat.
 ---@param cmd string
 local function run_allowed(cmd)
 	local cfg = require("harner").config.run_command
-	if not cfg.confirm then
+	if not cfg.confirm or grants().commands[cmd] then
 		return true
 	end
 	for _, entry in ipairs(cfg.allow or {}) do
@@ -438,8 +528,17 @@ M.tools.run_command = {
 			run()
 			return
 		end
-		vim.ui.select({ "run", "skip" }, { prompt = "harner: Claude wants to run `:" .. cmd .. "`" }, function(choice)
-			if choice == "run" then
+		ask({
+			title = "harner: Claude wants to run",
+			body = { ":" .. cmd },
+			filetype = "vim",
+			yes = "run",
+			always = "always run this command in this chat",
+		}, function(choice)
+			if choice == "always" then
+				grants().commands[cmd] = true
+			end
+			if choice ~= "no" then
 				run()
 			else
 				resolve("The user declined to run `:" .. cmd .. "`.", true)
@@ -488,18 +587,37 @@ local function loaded_buf(path)
 	return nil
 end
 
----Ask the user before a disk write unless config.write_file.confirm is off.
----@param prompt string
----@param yes string label of the confirming choice
+---Save a loaded buffer to its file.
+---@param buf integer
+---@return string|nil err
+local function write_buf(buf)
+	local ok, e = pcall(vim.api.nvim_buf_call, buf, function()
+		vim.cmd("silent write")
+	end)
+	return (not ok) and tostring(e) or nil
+end
+
+---Ask the user before a disk write unless config.write_file.confirm is off
+---or they already allowed every write in this chat.
+---@param title string
+---@param body string[]
+---@param yes string label of the confirming key
 ---@param cb fun(ok:boolean)
-local function confirm(prompt, yes, cb)
-	if not require("harner").config.write_file.confirm then
+local function confirm_write(title, body, yes, cb)
+	local g = grants()
+	if not require("harner").config.write_file.confirm or g.writes then
 		cb(true)
 		return
 	end
-	vim.ui.select({ yes, "skip" }, { prompt = prompt }, function(choice)
-		cb(choice == yes)
-	end)
+	ask(
+		{ title = title, body = body, yes = yes, always = "allow all writes in this chat" },
+		function(choice)
+			if choice == "always" then
+				g.writes = true
+			end
+			cb(choice ~= "no")
+		end
+	)
 end
 
 ---Byte offsets of every exact occurrence of `needle` in `text`.
@@ -623,6 +741,132 @@ local function offset_to_pos(starts, off)
 	return lo - 1, off - starts[lo]
 end
 
+---Replace `old` with `new` in `buf` and show the change; returns the result
+---text, errors when `old` is ambiguous or missing.
+---@param buf integer
+---@param path string
+---@param old string
+---@param new string
+---@param replace_all boolean|nil
+---@return string
+local function replace_in_buf(buf, path, old, new, replace_all)
+	local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+	local text = table.concat(lines, "\n")
+	local name = rel(path)
+
+	-- 1. exact substring match
+	local hits = find_all(text, old)
+	if #hits > 1 and not replace_all then
+		error(
+			string.format(
+				"old_str matches %d places in %s; include more surrounding lines so it is unique, or set replace_all",
+				#hits,
+				name
+			),
+			0
+		)
+	end
+	if #hits > 0 then
+		local starts, off = {}, 1
+		for i, l in ipairs(lines) do
+			starts[i] = off
+			off = off + #l + 1
+		end
+		local new_lines = vim.split(new, "\n", { plain = true })
+		local first_row
+		for i = #hits, 1, -1 do
+			local srow, scol = offset_to_pos(starts, hits[i][1])
+			local erow, ecol = offset_to_pos(starts, hits[i][2] + 1)
+			vim.api.nvim_buf_set_text(buf, srow, scol, erow, ecol, new_lines)
+			first_row = srow
+		end
+		local n = #new_lines
+		if n > 1 and new_lines[n] == "" then
+			n = n - 1 -- new_str ended with a newline
+		end
+		local first, last = show_range(buf, first_row + 1, first_row + n)
+		return string.format(
+			"Edited %s: replaced %d occurrence%s (now lines %d-%d, shown in the editor). The buffer is "
+				.. "modified but not saved; the user can review it, or call save_file to write it.",
+			name,
+			#hits,
+			#hits == 1 and "" or "s",
+			first,
+			last
+		)
+	end
+
+	-- 2. whole-line match ignoring trailing, then all leading/trailing whitespace
+	-- (not for whitespace-only old_str: it would match every blank line)
+	local old_lines = content_lines(old)
+	local new_lines = content_lines(new)
+	local levels = vim.trim(old) == "" and {} or {
+		{ "trailing whitespace", function(l)
+			return (l:gsub("[ \t]+$", ""))
+		end, false },
+		{ "indentation", vim.trim, true },
+	}
+	for _, lvl in ipairs(levels) do
+		local label, norm, fix_indent = lvl[1], lvl[2], lvl[3]
+		local starts = find_line_matches(lines, old_lines, norm)
+		if #starts > 1 and not replace_all then
+			error(
+				string.format(
+					"old_str matches %d places in %s (ignoring %s); include more surrounding lines so it is unique",
+					#starts,
+					name,
+					label
+				),
+				0
+			)
+		end
+		if #starts > 0 then
+			local sw = vim.bo[buf].shiftwidth
+			if sw == 0 then
+				sw = vim.bo[buf].tabstop
+			end
+			local first
+			for i = #starts, 1, -1 do
+				local s = starts[i]
+				local repl = new_lines
+				if fix_indent then
+					local matched = vim.list_slice(lines, s, s + #old_lines - 1)
+					repl = reindent(new_lines, old_lines, matched, sw)
+				end
+				vim.api.nvim_buf_set_lines(buf, s - 1, s - 1 + #old_lines, false, repl)
+				first = s
+			end
+			local last
+			first, last = show_range(buf, first, first + #new_lines - 1)
+			return string.format(
+				"Edited %s: replaced %d occurrence%s (now lines %d-%d, shown in the editor; old_str matched only "
+					.. "after ignoring %s, re-read the file before further edits). The buffer is modified but not "
+					.. "saved; the user can review it, or call save_file to write it.",
+				name,
+				#starts,
+				#starts == 1 and "" or "s",
+				first,
+				last,
+				label
+			)
+		end
+	end
+	error(
+		string.format(
+			"old_str was not found in %s. The file may have changed: read it again and copy the text exactly.",
+			name
+		),
+		0
+	)
+end
+
+---replace_in_buf, then remember the buffer's unsaved changes as Claude's.
+local function apply_edit(buf, path, old, new, replace_all)
+	local res = replace_in_buf(buf, path, old, new, replace_all)
+	edited[buf] = vim.api.nvim_buf_get_changedtick(buf)
+	return res
+end
+
 M.tools.edit_file = {
 	description = "Replace text in a file: `old_str` must match exactly once (copy it verbatim from the file, with "
 		.. "enough surrounding lines to be unique) and is replaced by `new_str`. Set `replace_all` to change every "
@@ -635,7 +879,8 @@ M.tools.edit_file = {
 		new_str = { type = "string", description = "Replacement text" },
 		replace_all = { type = "boolean", description = "Replace every occurrence instead of requiring exactly one" },
 	}, { "path", "old_str", "new_str" }),
-	handler = function(args)
+	async = true,
+	handler = function(args, resolve)
 		local path, err = resolve_path(args.path)
 		if not path then
 			error(err, 0)
@@ -651,126 +896,50 @@ M.tools.edit_file = {
 			error("old_str and new_str are identical", 0)
 		end
 		local buf = load_buf(path)
-		local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-		local text = table.concat(lines, "\n")
+		if claude_owned(buf) then
+			-- errors propagate to M.call like a sync tool's
+			resolve(apply_edit(buf, path, old, new, args.replace_all))
+			return
+		end
+		-- the user has unsaved changes of their own in this file: never mix
+		-- Claude's edit into them unasked
 		local name = rel(path)
-
-		-- 1. exact substring match
-		local hits = find_all(text, old)
-		if #hits > 1 and not args.replace_all then
-			error(
-				string.format(
-					"old_str matches %d places in %s; include more surrounding lines so it is unique, or set replace_all",
-					#hits,
-					name
-				),
-				0
-			)
-		end
-		if #hits > 0 then
-			local starts, off = {}, 1
-			for i, l in ipairs(lines) do
-				starts[i] = off
-				off = off + #l + 1
-			end
-			local new_lines = vim.split(new, "\n", { plain = true })
-			local first_row
-			for i = #hits, 1, -1 do
-				local srow, scol = offset_to_pos(starts, hits[i][1])
-				local erow, ecol = offset_to_pos(starts, hits[i][2] + 1)
-				vim.api.nvim_buf_set_text(buf, srow, scol, erow, ecol, new_lines)
-				first_row = srow
-			end
-			local n = #new_lines
-			if n > 1 and new_lines[n] == "" then
-				n = n - 1 -- new_str ended with a newline
-			end
-			local first, last = show_range(buf, first_row + 1, first_row + n)
-			return string.format(
-				"Edited %s: replaced %d occurrence%s (now lines %d-%d, shown in the editor). The buffer is "
-					.. "modified but not saved; the user can review it, or call save_file to write it.",
-				name,
-				#hits,
-				#hits == 1 and "" or "s",
-				first,
-				last
-			)
-		end
-
-		-- 2. whole-line match ignoring trailing, then all leading/trailing whitespace
-		-- (not for whitespace-only old_str: it would match every blank line)
-		local old_lines = content_lines(old)
-		local new_lines = content_lines(new)
-		local levels = vim.trim(old) == "" and {} or {
-			{ "trailing whitespace", function(l)
-				return (l:gsub("[ \t]+$", ""))
-			end, false },
-			{ "indentation", vim.trim, true },
-		}
-		for _, lvl in ipairs(levels) do
-			local label, norm, fix_indent = lvl[1], lvl[2], lvl[3]
-			local starts = find_line_matches(lines, old_lines, norm)
-			if #starts > 1 and not args.replace_all then
-				error(
-					string.format(
-						"old_str matches %d places in %s (ignoring %s); include more surrounding lines so it is unique",
-						#starts,
-						name,
-						label
-					),
-					0
+		ask({
+			title = "harner: Claude wants to edit a file you have unsaved changes in",
+			body = { name },
+			choices = {
+				{ key = "s", label = "save mine, then edit", value = "save" },
+				{ key = "d", label = "drop mine, then edit", value = "drop" },
+			},
+		}, function(choice)
+			if choice == "no" then
+				resolve(
+					name .. " has unsaved changes of the user's and they chose not to save or drop them; "
+						.. "it was not edited.",
+					true
 				)
+				return
 			end
-			if #starts > 0 then
-				local sw = vim.bo[buf].shiftwidth
-				if sw == 0 then
-					sw = vim.bo[buf].tabstop
-				end
-				local first
-				for i = #starts, 1, -1 do
-					local s = starts[i]
-					local repl = new_lines
-					if fix_indent then
-						local matched = vim.list_slice(lines, s, s + #old_lines - 1)
-						repl = reindent(new_lines, old_lines, matched, sw)
-					end
-					vim.api.nvim_buf_set_lines(buf, s - 1, s - 1 + #old_lines, false, repl)
-					first = s
-				end
-				local last
-				first, last = show_range(buf, first, first + #new_lines - 1)
-				return string.format(
-					"Edited %s: replaced %d occurrence%s (now lines %d-%d, shown in the editor; old_str matched only "
-						.. "after ignoring %s, re-read the file before further edits). The buffer is modified but not "
-						.. "saved; the user can review it, or call save_file to write it.",
-					name,
-					#starts,
-					#starts == 1 and "" or "s",
-					first,
-					last,
-					label
-				)
+			local werr
+			if choice == "save" then
+				werr = write_buf(buf)
+			else
+				local ok, e = pcall(vim.api.nvim_buf_call, buf, function()
+					vim.cmd("silent edit!")
+				end)
+				werr = (not ok) and tostring(e) or nil
 			end
-		end
-		error(
-			string.format(
-				"old_str was not found in %s. The file may have changed: read it again and copy the text exactly.",
-				name
-			),
-			0
-		)
+			if werr then
+				resolve(string.format("Could not %s the user's changes in %s: %s", choice, name, werr), true)
+				return
+			end
+			local done, res = pcall(apply_edit, buf, path, old, new, args.replace_all)
+			local prefix = choice == "save" and "Saved the user's changes first. "
+				or "Dropped the user's unsaved changes first (reloaded from disk). "
+			resolve(done and prefix .. res or "tool edit_file failed: " .. tostring(res), not done)
+		end)
 	end,
 }
-
----Save a loaded buffer to its file.
----@param buf integer
----@return string|nil err
-local function write_buf(buf)
-	local ok, e = pcall(vim.api.nvim_buf_call, buf, function()
-		vim.cmd("silent write")
-	end)
-	return (not ok) and tostring(e) or nil
-end
 
 ---Write `lines` to `path`, through the buffer when one is loaded so it stays in sync.
 ---@return string|nil err
@@ -822,7 +991,7 @@ M.tools.write_file = {
 		else
 			what = string.format("new file, %d lines", #lines)
 		end
-		confirm(string.format("harner: Claude wants to write %s (%s)", name, what), "write", function(ok)
+		confirm_write("harner: Claude wants to write", { name, "(" .. what .. ")" }, "write", function(ok)
 			if not ok then
 				resolve("The user declined to write " .. name .. ".", true)
 				return
@@ -843,36 +1012,65 @@ M.tools.write_file = {
 }
 
 M.tools.save_file = {
-	description = "Save a buffer with unsaved changes (for example after edit_file) to disk; the user confirms first.",
+	description = "Save buffers with unsaved changes (for example after edit_file) to disk; the user confirms "
+		.. "first. After editing several files pass them all in `paths` so the user confirms once.",
 	inputSchema = schema({
 		path = { type = "string", description = "File path, absolute or relative to the working directory" },
-	}, { "path" }),
+		paths = { type = "array", items = { type = "string" }, description = "Several files to save at once" },
+	}),
 	async = true,
 	handler = function(args, resolve)
-		local path, err = resolve_any_path(args.path)
-		if not path then
-			error(err, 0)
+		local list = {}
+		if type(args.paths) == "table" then
+			vim.list_extend(list, args.paths)
 		end
-		local name = rel(path)
-		local buf = loaded_buf(path)
-		if not buf then
-			error(name .. " is not open in the editor", 0)
+		if type(args.path) == "string" and args.path ~= "" then
+			table.insert(list, 1, args.path)
 		end
-		if not vim.bo[buf].modified then
-			resolve(name .. " has no unsaved changes.")
+		if #list == 0 then
+			error("path or paths is required", 0)
+		end
+		local todo, notes, failed = {}, {}, false
+		for _, p in ipairs(list) do
+			local path, err = resolve_any_path(p)
+			local buf = path and loaded_buf(path)
+			if not path then
+				notes[#notes + 1], failed = err, true
+			elseif not buf then
+				notes[#notes + 1], failed = rel(path) .. " is not open in the editor", true
+			elseif not vim.bo[buf].modified then
+				notes[#notes + 1] = rel(path) .. " has no unsaved changes."
+			elseif not vim.tbl_contains(todo, buf) then
+				todo[#todo + 1] = buf
+			end
+		end
+		if #todo == 0 then
+			if #list == 1 and failed then
+				error(notes[1], 0)
+			end
+			resolve(table.concat(notes, "\n"), failed)
 			return
 		end
-		confirm("harner: Claude wants to save " .. name, "save", function(ok)
+		local names = vim.tbl_map(function(b)
+			return rel(vim.api.nvim_buf_get_name(b))
+		end, todo)
+		local title = #todo == 1 and "harner: Claude wants to save"
+			or string.format("harner: Claude wants to save %d files", #todo)
+		confirm_write(title, names, "save", function(ok)
 			if not ok then
-				resolve("The user declined to save " .. name .. ".", true)
+				resolve("The user declined to save " .. table.concat(names, ", ") .. ".", true)
 				return
 			end
-			local werr = write_buf(buf)
-			if werr then
-				resolve("Saving " .. name .. " failed: " .. werr, true)
-			else
-				resolve(string.format("Saved %s (%d lines).", name, vim.api.nvim_buf_line_count(buf)))
+			for i, buf in ipairs(todo) do
+				local werr = write_buf(buf)
+				if werr then
+					notes[#notes + 1], failed = "Saving " .. names[i] .. " failed: " .. werr, true
+				else
+					notes[#notes + 1] =
+						string.format("Saved %s (%d lines).", names[i], vim.api.nvim_buf_line_count(buf))
+				end
 			end
+			resolve(table.concat(notes, "\n"), failed)
 		end)
 	end,
 }
@@ -899,7 +1097,8 @@ local function tool_done(name)
 	pcall(require("harner.chat").on_tool_done, name)
 end
 
----MCP tools/call payload, or `{ pending = id }` for an async tool.
+---MCP tools/call payload, or `{ pending = id }` for an async tool still
+---waiting on the user.
 ---@param name string
 ---@param args table
 function M.call(name, args)
@@ -917,10 +1116,18 @@ function M.call(name, args)
 				tool_done(name)
 			end
 		end
+		calling = id
 		local ok, err = pcall(t.handler, args or {}, resolve)
+		calling = nil
 		if not ok then
 			pending[id] = nil
 			return text_result("tool " .. name .. " failed: " .. tostring(err), true)
+		end
+		local res = pending[id]
+		if res then
+			-- resolved before returning (nothing to ask): no polling needed
+			pending[id] = nil
+			return res
 		end
 		return { pending = id }
 	end
@@ -953,9 +1160,22 @@ end
 ---@param id integer|nil
 function M.cancel_pending(reason, id)
 	local ids = id and { id } or vim.tbl_keys(pending)
+	local cancelled = false
 	for _, k in ipairs(ids) do
 		if pending[k] == false then
 			pending[k] = text_result(reason, true)
+			cancelled = true
+		end
+	end
+	if cancelled then
+		-- the winbar still says "running <tool>" (on_tool_done ignores the name)
+		tool_done(nil)
+	end
+	-- an open confirm would otherwise still run or write after the call
+	-- ended; its decline lands on an already resolved call and is dropped
+	for _, k in ipairs(id and { id } or vim.tbl_keys(asking)) do
+		if asking[k] then
+			asking[k]("no")
 		end
 	end
 end
