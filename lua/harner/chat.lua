@@ -14,6 +14,9 @@ local SEP = string.rep("─", 40)
 ---@field run HarnerRun|nil
 ---@field origin_win integer|nil
 ---@field tool_line integer|nil 1-based line of the last tool note, amended when the input arrives
+---@field auto boolean auto mode (fewer confirms, see auto.lua)
+---@field last_prompt string|nil the user's latest message (classifier context)
+---@field state string|nil last winbar state
 
 ---@type table<integer, HarnerChat>
 M.chats = {}
@@ -94,10 +97,18 @@ function M.target_win()
 end
 
 local function set_winbar(chat, state)
+	chat.state = state
 	local win = chat_win(chat)
 	if win then
-		vim.wo[win].winbar = string.format("%%#Title# harner %%* %s · %s", chat.session_id:sub(1, 8), state)
+		local badge = chat.auto and " %#DiagnosticWarn#AUTO%*" or ""
+		vim.wo[win].winbar = string.format("%%#Title# harner %%* %s · %s%s", chat.session_id:sub(1, 8), state, badge)
 	end
+end
+
+---Redraw the winbar with its current state (after toggling auto mode).
+---@param chat HarnerChat
+function M.refresh_winbar(chat)
+	set_winbar(chat, chat.state or (chat.run and "thinking…" or "idle"))
 end
 
 local function last_sep_index(buf)
@@ -237,12 +248,45 @@ local function amend_tool_note(chat, name, input)
 		return
 	end
 	local cur = vim.api.nvim_buf_get_lines(chat.buf, line - 1, line, false)[1]
-	if cur ~= tool_note(name) then
+	local bare = tool_note(name)
+	-- mark_auto may have got there first: keep its suffix
+	local auto = cur and vim.startswith(cur, bare:sub(1, -2) .. " · auto (") and cur:sub(#bare) or nil
+	if cur ~= bare and not auto then
 		return
 	end
 	local summary = tool_summary(name, input)
 	if summary then
-		vim.api.nvim_buf_set_lines(chat.buf, line - 1, line, false, { tool_note(name, summary) })
+		local note = tool_note(name, summary)
+		if auto then
+			note = note:sub(1, -2) .. auto
+		end
+		vim.api.nvim_buf_set_lines(chat.buf, line - 1, line, false, { note })
+	end
+end
+
+---Mark the transcript note of a call that auto mode let run without asking:
+---`_→ nvim:bash · $ git log · auto (rule)_`. Searches back from the end for
+---the call's note (amended or not yet), so parallel calls each get theirs.
+---@param name string tool name without the mcp__nvim__ prefix
+---@param input table the call's arguments
+---@param how string "rule" or "classifier"
+function M.mark_auto(name, input, how)
+	local chat = M.current and M.chats[M.current]
+	if not chat or not vim.api.nvim_buf_is_valid(chat.buf) then
+		return
+	end
+	local full = "mcp__nvim__" .. name
+	local wanted = { tool_note(full, tool_summary(full, input or {})), tool_note(full) }
+	local lines = vim.api.nvim_buf_get_lines(chat.buf, 0, -1, false)
+	for i = #lines, 1, -1 do
+		if lines[i] == SEP then
+			return
+		end
+		if lines[i] == wanted[1] or lines[i] == wanted[2] then
+			local marked = lines[i]:sub(1, -2) .. " · auto (" .. how .. ")_"
+			vim.api.nvim_buf_set_lines(chat.buf, i - 1, i, false, { marked })
+			return
+		end
 	end
 end
 
@@ -293,6 +337,7 @@ function M.send(buf, opts)
 		chat.origin_win = origin
 	end
 	M.current = buf
+	chat.last_prompt = prompt -- context for the auto-mode classifier
 
 	local out = { "## You", "" }
 	vim.list_extend(out, vim.split(prompt, "\n", { plain = true }))
@@ -371,7 +416,14 @@ local function create_chat()
 	vim.bo[buf].filetype = "markdown"
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "" })
 
-	local chat = { buf = buf, session_id = uuid(), started = false, run = nil, origin_win = nil }
+	local chat = {
+		buf = buf,
+		session_id = uuid(),
+		started = false,
+		run = nil,
+		origin_win = nil,
+		auto = require("harner").config.auto.enabled == true,
+	}
 	M.chats[buf] = chat
 
 	local map = function(mode, lhs, rhs, desc)

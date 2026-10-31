@@ -39,6 +39,7 @@ vim.api.nvim_create_autocmd("ColorScheme", {
 ---@field always string|nil label of the `a` key; omitted means no `a` choice
 ---@field choices {key:string, label:string, value:string}[]|nil extra keys,
 ---       each answering its `value` (used instead of or next to yes/always)
+---@field note string|nil shown dimmed under the body (auto mode's reason for asking)
 
 ---Ask the user; `cb` gets "yes", "always", a choice's value or "no" exactly once.
 ---Returns the float's close function: calling it with "no" declines it.
@@ -87,6 +88,13 @@ function M.ask(opts, cb)
 		longest = math.max(longest, vim.fn.strdisplaywidth(l) + 2)
 	end
 	longest = math.max(longest, vim.fn.strdisplaywidth(footer_text) + 4)
+	if opts.note then
+		longest = math.max(longest, vim.fn.strdisplaywidth(opts.note) + 2)
+		local ns = vim.api.nvim_create_namespace("harner_confirm")
+		vim.api.nvim_buf_set_extmark(buf, ns, math.max(#opts.body - 1, 0), 0, {
+			virt_lines = { { { opts.note, "HarnerConfirmFooter" } } },
+		})
+	end
 	local width = math.max(20, math.min(longest, vim.o.columns - 8))
 	local win = vim.api.nvim_open_win(buf, true, {
 		relative = "editor",

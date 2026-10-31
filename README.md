@@ -36,8 +36,8 @@ instead, list the commands and keys in the spec:
 ```lua
 {
   "<github-user>/harner",
-  cmd = { "Harner", "HarnerAsk", "HarnerNew", "HarnerCancel" },
-  keys = { "<leader>hh", { "<leader>hh", mode = "x" }, "<leader>ht", "<leader>hn", "<leader>hx" },
+  cmd = { "Harner", "HarnerAsk", "HarnerNew", "HarnerCancel", "HarnerAuto" },
+  keys = { "<leader>hh", { "<leader>hh", mode = "x" }, "<leader>ht", "<leader>hn", "<leader>hx", "<leader>ha" },
   opts = {},
 }
 ```
@@ -50,6 +50,7 @@ instead, list the commands and keys in the spec:
 | `<leader>ht` / `:Harner` | toggle the chat split                                              |
 | `<leader>hn` / `:HarnerNew` | new chat (fresh Claude session)                                 |
 | `<leader>hx` / `:HarnerCancel` | cancel the running request                                   |
+| `<leader>ha` / `:HarnerAuto` | toggle auto mode (fewer confirms) for the current chat         |
 | `:HarnerAsk [text]`      | send text directly, or open the popup when called bare; `:'<,'>HarnerAsk` attaches the range |
 
 In the popup `<CR>` sends, `<S-CR>` or `<C-CR>` inserts a newline, `<Esc>`
@@ -98,6 +99,29 @@ Claude wants to edit a file you have unsaved changes in, it asks first: `s`
 saves your changes and then edits, `d` drops them (reloads from disk), `n`
 skips the edit.
 
+### Auto mode
+
+`<leader>ha` turns on auto mode for the current chat (the winbar shows
+`AUTO`; a new chat starts at `auto.enabled`). Your allow-lists and `a` grants
+still apply first. Beyond them:
+
+- writes (`write_file`, `save_file`) inside the working directory run without
+  asking, except under `.git/` and `.claude/` (its hooks run commands) and files that run code when loaded
+  (`.nvim.lua`, `.nvimrc`, `.exrc`, `.lazy.lua`, `.envrc`);
+- a built-in list of read-only shell commands runs without asking (`git
+  status|log|diff|show|blame`, read-only `git branch`, `ls`, `pwd`, `rg`, and
+  `cat|head|tail|wc` on paths inside the working directory), plus your
+  `auto.allow` entries; shell operators still rule a command out;
+- every other `bash` and `run_command` call goes to a classifier
+  (`claude -p --model haiku`, no tools) that sees the command, Claude's
+  description and your latest message. It either lets the call run or opens
+  the normal confirm with its reason under the command. It never refuses on
+  its own; an error or a timeout (`auto.timeout`, 15 s) asks you;
+- `edit_file`'s save/drop question over your own unsaved changes always asks.
+
+Calls that ran unasked are marked in the transcript, e.g.
+`→ nvim:bash · $ git log -5 · auto (rule)` or `· auto (classifier)`.
+
 The confirm float has its own highlight groups so it stands out from the
 code behind it: `HarnerConfirmBorder`, `HarnerConfirmTitle` and
 `HarnerConfirmKey` (the keys in the footer) link to `DiagnosticInfo` by
@@ -144,12 +168,19 @@ require("harner").setup({
     timeout = 120,        -- seconds when Claude gives none (max 540)
     max_output = 30000,   -- bytes returned to Claude, middle cut beyond that
   },
+  auto = {                -- auto mode, see above
+    enabled = false,      -- default for new chats (<leader>ha toggles per chat)
+    allow = {},           -- extra bash prefixes that run without asking
+    model = "haiku",      -- classifier model
+    timeout = 15,         -- classifier seconds before falling back to asking
+  },
   keys = {                -- set an entry to false to skip it
     group = "<leader>h",  -- which-key group label
     ask = "<leader>hh",
     toggle = "<leader>ht",
     new = "<leader>hn",
     cancel = "<leader>hx",
+    auto = "<leader>ha",
   },
   prompt = {
     width = 0.6,

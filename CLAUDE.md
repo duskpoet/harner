@@ -19,6 +19,7 @@ One chat session per nvim instance, reachable from any window:
 | `<leader>ht` | toggle the chat split                                      |
 | `<leader>hn` | new chat (fresh Claude session)                            |
 | `<leader>hx` | cancel the running request                                 |
+| `<leader>ha` | toggle auto mode for the current chat (`:HarnerAuto`)      |
 
 Keys live in `config.keys` (any entry `false` disables it; `keys.group`
 registers a which-key group). `:HarnerAsk [text]` sends text directly or opens
@@ -108,6 +109,26 @@ All modules live in `lua/harner/`:
   `cancel_pending()` declines them after marking the calls cancelled (one id
   on a bridge timeout, all on cancel / run end), so nothing runs or writes
   after a call ended.
+- `auto.lua` — auto mode, a per-chat flag (`chat.auto`, default
+  `config.auto.enabled`, winbar badge `AUTO`, reset by `<leader>hn`). After
+  the existing short-circuits (confirm off, grants, allow-lists) it decides
+  before the confirm: `writes_ok(paths)` (inside the real cwd, not `.git/` or `.claude/` (hooks),
+  not `.nvim.lua`/`.nvimrc`/`.exrc`/`.lazy.lua`/`.envrc`) for
+  write_file/save_file; `bash_ok(cmd)` (operator ban + built-in read-only list
+  with per-entry argument checks, e.g. no `--output`, no `rg --pre`, `git
+  branch` read flags only, `cat`/`head`/`tail`/`wc` paths inside cwd, plus
+  `config.auto.allow`); otherwise for bash/run_command `classify()` spawns
+  `claude -p --model haiku --tools "" --strict-mcp-config
+  --no-session-persistence --system-prompt …` with the command, description,
+  cwd and `chat.last_prompt` on stdin. `ALLOW` runs; `ASK: reason`, garbage,
+  failure or timeout (`config.auto.timeout`) opens the confirm with the reason
+  as `note` (a dimmed virt line). It never denies. `tools.auto_or_confirm`
+  wires it in; the classifier answers after the handler returned, so it
+  checks `M.is_pending(id)` first (a cancel must not run anything) and passes
+  the id to `ask()` explicitly. Unasked runs are marked in the transcript by
+  `chat.mark_auto(tool, args, "rule"|"classifier")`, which finds the call's
+  note above the last separator; `amend_tool_note` keeps the suffix if the
+  mark came first. edit_file's save/drop question is never automated.
 - `tools.lua` — `M.tools[name] = {description, inputSchema, handler, async?}`.
   `list()` and `call(name, args)` are what the bridge invokes. Sync handlers
   return a string; errors become `isError = true` results. Async handlers
@@ -277,6 +298,10 @@ nvim --headless -u NONE -l tests/confirm_test.lua
 # bash tool: opt-in listing, allow-list vs operators, confirm / decline /
 # grant, stderr + exit code, truncation, timeout and cancel killing the group
 nvim --headless -u NONE -l tests/bash_test.lua
+
+# auto mode: toggle/badge/reset, write and bash rules, classifier allow / ask /
+# garbage / timeout / cancel against a fake `claude` script, note marks
+nvim --headless -u NONE -l tests/auto_test.lua
 
 # runner + chat against a fake `claude` shell script replaying stream events:
 # tool note summaries, cost in the winbar, missing-binary error (offline)

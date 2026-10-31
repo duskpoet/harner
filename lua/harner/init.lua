@@ -49,6 +49,19 @@ M.config = {
 		timeout = 120, -- seconds, when Claude gives none (Claude may ask for up to 540)
 		max_output = 30000, -- bytes returned to Claude; the middle is cut beyond that
 	},
+	-- auto mode: fewer confirms, per chat (<leader>ha / :HarnerAuto toggles it,
+	-- a new chat starts at `enabled`). With it on, writes inside the working
+	-- directory (not .git/, .claude/ or files that run code when loaded, like .nvim.lua)
+	-- and built-in read-only bash commands (git status/log/diff/show/blame,
+	-- ls, rg, ...) plus `allow` run without asking; other bash and run_command
+	-- calls go to a classifier (`claude -p --model <model>`) that either lets
+	-- them run or hands them to the normal confirm with its reason.
+	auto = {
+		enabled = false,
+		allow = {}, ---@type string[] extra bash prefixes (whole words, no shell operators)
+		model = "haiku",
+		timeout = 15, -- seconds for the classifier; on timeout the user is asked
+	},
 	-- global normal-mode keymaps; set one to false to skip it
 	keys = {
 		group = "<leader>h", -- which-key group label, false to skip
@@ -56,6 +69,7 @@ M.config = {
 		toggle = "<leader>ht", -- show/hide the chat split
 		new = "<leader>hn", -- fresh chat (new Claude session)
 		cancel = "<leader>hx", -- cancel the running request
+		auto = "<leader>ha", -- toggle auto mode for the current chat
 	},
 	-- the input popup (<leader>hh / :HarnerAsk)
 	prompt = {
@@ -92,6 +106,9 @@ function M.setup(opts)
 	vim.api.nvim_create_user_command("HarnerCancel", function()
 		chat().cancel()
 	end, { desc = "Cancel the running harner request" })
+	vim.api.nvim_create_user_command("HarnerAuto", function()
+		require("harner.auto").toggle()
+	end, { desc = "Toggle harner auto mode for the current chat" })
 	vim.api.nvim_create_user_command("HarnerAsk", function(cmd)
 		local ref = nil
 		if cmd.range > 0 then
@@ -142,6 +159,9 @@ function M.setup(opts)
 	map(keys.cancel, function()
 		chat().cancel()
 	end, "Harner: cancel request")
+	map(keys.auto, function()
+		require("harner.auto").toggle()
+	end, "Harner: toggle auto mode")
 	if keys.group and keys.group ~= "" then
 		local ok, wk = pcall(require, "which-key")
 		if ok and wk.add then

@@ -428,14 +428,19 @@ local calling = nil ---@type integer|nil
 -- Close functions of the confirm floats still open, by pending call id.
 ---@type table<integer, fun(choice:string)>
 local asking = {}
+-- Auto-mode classifier processes still deciding, by pending call id.
+---@type table<integer, vim.SystemObj>
+local classifying = {}
 
 ---confirm.ask for the running async call, remembered so cancel_pending can
 ---decline it: a confirm answered after its call was cancelled or timed out
 ---must not run or write anything.
 ---@param opts HarnerConfirmOpts
 ---@param cb fun(choice:string)
-local function ask(opts, cb)
-	local id = calling
+---@param id integer|nil the call's id when asking later than its handler ran
+---       (after the auto-mode classifier answered)
+local function ask(opts, cb, id)
+	id = id or calling
 	local close = require("harner.confirm").ask(opts, function(choice)
 		if id then
 			asking[id] = nil
@@ -474,6 +479,52 @@ function M.reset_grants()
 	end
 end
 
+---Auto mode for a command the allow-lists and grants did not cover: run it
+---when a static rule matches or the classifier allows it (marking the
+---transcript note), otherwise `confirm(note)` with the reason. With auto mode
+---off this is just `confirm()`.
+---@param id integer|nil pending call id
+---@param tool string tool name ("bash", "run_command")
+---@param args table the call's arguments (to find its transcript note)
+---@param action { kind: string, command: string, description: string|nil }
+---@param rule_ok boolean the static rules allow it
+---@param run fun()
+---@param confirm fun(note: string|nil)
+local function auto_or_confirm(id, tool, args, action, rule_ok, run, confirm)
+	local auto = require("harner.auto")
+	if not auto.enabled() then
+		confirm()
+		return
+	end
+	local function mark(how)
+		pcall(require("harner.chat").mark_auto, tool, args, how)
+	end
+	if rule_ok then
+		mark("rule")
+		run()
+		return
+	end
+	local proc = auto.classify(action, function(allow, reason)
+		if id then
+			classifying[id] = nil
+		end
+		-- cancelled or timed out while the classifier ran: do nothing
+		if id and not M.is_pending(id) then
+			return
+		end
+		if allow then
+			mark("classifier")
+			run()
+		else
+			confirm("auto mode asks: " .. (reason or "no reason given"))
+		end
+	end)
+	-- the callback is always scheduled, so it cannot have run yet
+	if id and proc then
+		classifying[id] = proc
+	end
+end
+
 ---True when `cmd` starts with one of the allow-listed commands (whole words)
 ---or the user allowed exactly this command for the chat.
 ---@param cmd string
@@ -482,12 +533,7 @@ local function run_allowed(cmd)
 	if not cfg.confirm or grants().commands[cmd] then
 		return true
 	end
-	for _, entry in ipairs(cfg.allow or {}) do
-		if cmd == entry or vim.startswith(cmd, entry .. " ") then
-			return true
-		end
-	end
-	return false
+	return require("harner.auto").matches_any(cmd, cfg.allow)
 end
 
 ---Run an Ex command in the target window.
@@ -533,22 +579,27 @@ M.tools.run_command = {
 			run()
 			return
 		end
-		ask({
-			title = "harner: Claude wants to run",
-			body = { ":" .. cmd },
-			filetype = "vim",
-			yes = "run",
-			always = "always run this command in this chat",
-		}, function(choice)
-			if choice == "always" then
-				grants().commands[cmd] = true
-			end
-			if choice ~= "no" then
-				run()
-			else
-				resolve("The user declined to run `:" .. cmd .. "`.", true)
-			end
-		end)
+		local id = calling
+		local function confirm(note)
+			ask({
+				title = "harner: Claude wants to run",
+				body = { ":" .. cmd },
+				filetype = "vim",
+				yes = "run",
+				always = "always run this command in this chat",
+				note = note,
+			}, function(choice)
+				if choice == "always" then
+					grants().commands[cmd] = true
+				end
+				if choice ~= "no" then
+					run()
+				else
+					resolve("The user declined to run `:" .. cmd .. "`.", true)
+				end
+			end, id)
+		end
+		auto_or_confirm(id, "run_command", args, { kind = "Neovim Ex command", command = ":" .. cmd }, false, run, confirm)
 	end,
 }
 
@@ -608,15 +659,8 @@ local function bash_allowed(cmd)
 	if not cfg.confirm or grants().shell[cmd] then
 		return true
 	end
-	if cmd:find("[;&|<>$`\\\n(){}]") then
-		return false
-	end
-	for _, entry in ipairs(cfg.allow or {}) do
-		if cmd == entry or vim.startswith(cmd, entry .. " ") then
-			return true
-		end
-	end
-	return false
+	local auto = require("harner.auto")
+	return not auto.has_operators(cmd) and auto.matches_any(cmd, cfg.allow)
 end
 
 ---Cut `s` to at most `max` bytes, keeping head and tail on UTF-8 boundaries.
@@ -759,26 +803,40 @@ M.tools.bash = {
 			run()
 			return
 		end
+		local desc = type(args.description) == "string" and args.description or nil
 		local body = vim.split(cmd, "\n", { plain = true })
-		if type(args.description) == "string" and args.description ~= "" then
-			table.insert(body, 1, "# " .. args.description:gsub("\n", " "))
+		if desc and desc ~= "" then
+			table.insert(body, 1, "# " .. desc:gsub("\n", " "))
 		end
-		ask({
-			title = "harner: Claude wants to run in the shell",
-			body = body,
-			filetype = "sh",
-			yes = "run",
-			always = "always run this command in this chat",
-		}, function(choice)
-			if choice == "always" then
-				grants().shell[cmd] = true
-			end
-			if choice ~= "no" then
-				run()
-			else
-				resolve("The user declined to run `" .. cmd .. "`.", true)
-			end
-		end)
+		local function confirm(note)
+			ask({
+				title = "harner: Claude wants to run in the shell",
+				body = body,
+				filetype = "sh",
+				yes = "run",
+				always = "always run this command in this chat",
+				note = note,
+			}, function(choice)
+				if choice == "always" then
+					grants().shell[cmd] = true
+				end
+				if choice ~= "no" then
+					run()
+				else
+					resolve("The user declined to run `" .. cmd .. "`.", true)
+				end
+			end, id)
+		end
+		local auto = require("harner.auto")
+		auto_or_confirm(
+			id,
+			"bash",
+			args,
+			{ kind = "shell command (" .. (bash_cfg().shell or "bash") .. " -c)", command = cmd, description = desc },
+			auto.bash_ok(cmd),
+			run,
+			confirm
+		)
 	end,
 }
 
@@ -836,11 +894,19 @@ end
 ---or they already allowed every write in this chat.
 ---@param title string
 ---@param body string[]
+---In auto mode, writes the rules allow (auto.writes_ok) skip it too.
 ---@param yes string label of the confirming key
+---@param target { tool: string, args: table, paths: string[] } the call, for auto mode
 ---@param cb fun(ok:boolean)
-local function confirm_write(title, body, yes, cb)
+local function confirm_write(title, body, yes, target, cb)
 	local g = grants()
 	if not require("harner").config.write_file.confirm or g.writes then
+		cb(true)
+		return
+	end
+	local auto = require("harner.auto")
+	if auto.enabled() and auto.writes_ok(target.paths) then
+		pcall(require("harner.chat").mark_auto, target.tool, target.args, "rule")
 		cb(true)
 		return
 	end
@@ -1226,7 +1292,8 @@ M.tools.write_file = {
 		else
 			what = string.format("new file, %d lines", #lines)
 		end
-		confirm_write("harner: Claude wants to write", { name, "(" .. what .. ")" }, "write", function(ok)
+		local target = { tool = "write_file", args = args, paths = { path } }
+		confirm_write("harner: Claude wants to write", { name, "(" .. what .. ")" }, "write", target, function(ok)
 			if not ok then
 				resolve("The user declined to write " .. name .. ".", true)
 				return
@@ -1291,7 +1358,14 @@ M.tools.save_file = {
 		end, todo)
 		local title = #todo == 1 and "harner: Claude wants to save"
 			or string.format("harner: Claude wants to save %d files", #todo)
-		confirm_write(title, names, "save", function(ok)
+		local target = {
+			tool = "save_file",
+			args = args,
+			paths = vim.tbl_map(function(b)
+				return vim.api.nvim_buf_get_name(b)
+			end, todo),
+		}
+		confirm_write(title, names, "save", target, function(ok)
 			if not ok then
 				resolve("The user declined to save " .. table.concat(names, ", ") .. ".", true)
 				return
@@ -1385,6 +1459,12 @@ function M.call(name, args)
 	return text_result(tostring(res))
 end
 
+---True while the async call `id` waits for its result.
+---@param id integer
+function M.is_pending(id)
+	return pending[id] == false
+end
+
 ---Bridge polling: the finished result of an async call, or nil while it runs.
 ---@param id integer
 ---@return table|nil
@@ -1435,6 +1515,13 @@ end
 ---@param id integer|nil
 ---@param exiting boolean|nil
 function M.kill_running(id, exiting)
+	-- auto-mode classifiers: plain children, their answer would be dropped anyway
+	for _, k in ipairs(id and { id } or vim.tbl_keys(classifying)) do
+		if classifying[k] then
+			pcall(classifying[k].kill, classifying[k], "sigterm")
+			classifying[k] = nil
+		end
+	end
 	local procs = {}
 	for _, k in ipairs(id and { id } or vim.tbl_keys(running)) do
 		if running[k] then
