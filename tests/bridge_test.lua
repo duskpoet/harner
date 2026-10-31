@@ -1,4 +1,5 @@
-vim.opt.rtp:prepend(vim.fn.expand("~/.config/nvim"))
+local t = dofile(vim.fs.dirname(debug.getinfo(1, "S").source:sub(2)) .. "/helper.lua")
+local root, check = t.root, t.check
 -- Bridge round-trip test: initialize, tools/list, every tool category
 -- (display, open_file, edit_file / write_file / save_file, async ask_user /
 -- run_command), error paths. Offline.
@@ -7,12 +8,8 @@ vim.opt.rtp:prepend(vim.fn.expand("~/.config/nvim"))
 require("harner").setup({ show_text = { mode = "split" } })
 local mcp = require("harner.mcp")
 local addr = mcp.server_address()
-local bridge = vim.fn.expand("~/.config/nvim/lua/harner/bridge.lua")
-local here = vim.fn.expand("~/.config/nvim/lua/harner")
-vim.cmd("cd " .. here)
-
-local fails = 0
-local function check(cond, msg) if not cond then fails = fails + 1 end; io.stderr:write((cond and "ok   " or "FAIL ") .. msg .. "\n") end
+local bridge = root .. "/lua/harner/bridge.lua"
+vim.cmd("cd " .. vim.fn.fnameescape(root))
 
 local ui_prompts = {}
 vim.ui.select = function(items, opts, cb)
@@ -72,7 +69,7 @@ local reqs = {
   { jsonrpc = "2.0", id = 26, method = "tools/call", params = { name = "edit_file", arguments = { path = tmp .. "/missing.lua", old_str = "a", new_str = "b" } } },
   { jsonrpc = "2.0", id = 34, method = "tools/call", params = { name = "edit_file", arguments = { path = edit_path, old_str = "   ", new_str = "x", replace_all = true } } },
   { jsonrpc = "2.0", id = 35, method = "tools/call", params = { name = "edit_file", arguments = { path = edit_path, old_str = "\n        deep = true", new_str = "\n        deep = false\n            more = 1" } } },
-  { jsonrpc = "2.0", id = 6, method = "tools/call", params = { name = "open_file", arguments = { path = "mcp.lua", line = 12, end_line = 14 } } },
+  { jsonrpc = "2.0", id = 6, method = "tools/call", params = { name = "open_file", arguments = { path = "lua/harner/mcp.lua", line = 12, end_line = 14 } } },
   { jsonrpc = "2.0", id = 7, method = "tools/call", params = { name = "open_file", arguments = { path = "does/not/exist.lua" } } },
   { jsonrpc = "2.0", id = 27, method = "tools/call", params = { name = "save_file", arguments = { path = edit_path } } },
   { jsonrpc = "2.0", id = 28, method = "tools/call", params = { name = "write_file", arguments = { path = tmp .. "/new.txt", content = "a\nb\n" } } },
@@ -110,7 +107,7 @@ check(text(3):find("Displayed 2 lines", 1, true) ~= nil and not is_err(3), "show
 check(is_err(4) and text(4):find("unknown tool", 1, true), "unknown tool is an error result")
 check(replies[5] and replies[5].error and replies[5].error.code == -32601, "unknown method is a jsonrpc error")
 
-check(text(6) == "Opened mcp.lua, highlighted lines 12-14." and not is_err(6), "open_file: " .. text(6))
+check(text(6) == "Opened lua/harner/mcp.lua, highlighted lines 12-14." and not is_err(6), "open_file: " .. text(6))
 local fwin
 for _, w in ipairs(vim.api.nvim_list_wins()) do
   if vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(w)):match("mcp%.lua$") then fwin = w end
@@ -180,5 +177,4 @@ check(got and got.isError and got.content[1].text == "cancelled by the user", "c
 check(tools.poll(res.pending).isError, "poll after collection reports the id as cancelled")
 
 io.stderr:write("STDERR from bridge: " .. table.concat(err) .. "\n")
-io.stderr:write(fails == 0 and "ALL OK\n" or (fails .. " FAILED\n"))
-vim.cmd("qa!")
+t.finish()

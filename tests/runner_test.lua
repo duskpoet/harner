@@ -1,11 +1,9 @@
-vim.opt.rtp:prepend(vim.fn.expand("~/.config/nvim"))
+local t = dofile(vim.fs.dirname(debug.getinfo(1, "S").source:sub(2)) .. "/helper.lua")
+local check = t.check
 vim.o.columns = 160; vim.o.lines = 50
 -- Offline test of runner.lua + chat.lua against a fake `claude` script that
 -- replays stream-json events: tool notes get their input summary, text
 -- streams, the result line sets the winbar, and a missing binary is reported.
-local fails = 0
-local function check(cond, msg) if not cond then fails = fails + 1 end; io.stderr:write((cond and "ok   " or "FAIL ") .. msg .. "\n") end
-
 local fake = vim.fn.tempname() .. "-fake-claude"
 local events = {
   { type = "system", subtype = "init" },
@@ -61,5 +59,4 @@ check(text:find("> **error:** `/nonexistent/claude-binary` not found on PATH", 1
 check(c.run == nil, "run cleared after missing-binary error")
 
 os.remove(fake)
-io.stderr:write(fails == 0 and "ALL OK\n" or (fails .. " FAILED\n"))
-vim.cmd("qa!")
+t.finish()

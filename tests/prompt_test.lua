@@ -1,4 +1,5 @@
-vim.opt.rtp:prepend(vim.fn.expand("~/.config/nvim"))
+local t = dofile(vim.fs.dirname(debug.getinfo(1, "S").source:sub(2)) .. "/helper.lua")
+local root, check = t.root, t.check
 vim.o.columns = 160; vim.o.lines = 50
 -- Offline UI test for the input popup and <leader>h keymaps. The runner is
 -- stubbed (the only test that does so) so no claude process is started.
@@ -8,12 +9,10 @@ package.loaded["harner.runner"] = {
   cancel = function() end,
 }
 require("harner").setup()
-local fails = 0
-local function check(cond, msg) if not cond then fails = fails + 1 end; io.stderr:write((cond and "ok   " or "FAIL ") .. msg .. "\n") end
 local function keys(s, flags) vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(s, true, false, true), flags or "x", false) end
 local function set(lines) vim.api.nvim_buf_set_lines(0, 0, -1, false, lines); vim.cmd("doautocmd TextChanged") end
 
-vim.cmd("edit " .. vim.fn.expand("~/.config/nvim/lua/harner/mcp.lua"))
+vim.cmd("edit " .. vim.fn.fnameescape(root .. "/lua/harner/mcp.lua"))
 local edit_win = vim.api.nvim_get_current_win()
 check(vim.fn.maparg("<leader>hh", "n") ~= "", "<leader>hh mapped")
 check(vim.fn.maparg("<leader>ht", "n") ~= "", "<leader>ht mapped")
@@ -100,7 +99,7 @@ check(title_text:find("mcp.lua:5%-7") ~= nil, "title shows reference: " .. title
 set({ "what does this do?" })
 keys("<CR>")
 local sent = started[#started]
-local relpath = vim.fn.fnamemodify(vim.fn.expand("~/.config/nvim/lua/harner/mcp.lua"), ":.")
+local relpath = vim.fn.fnamemodify(root .. "/lua/harner/mcp.lua", ":.")
 check(sent and sent.prompt == "what does this do?\n\nSelection: " .. relpath .. " lines 5-7 (read it with get_selection)",
   "prompt ends with the reference line, got: " .. vim.inspect(sent and sent.prompt))
 check(not sent.prompt:find("local M = {}", 1, true), "selected text itself is not pasted")
@@ -125,5 +124,4 @@ set({ "plain" })
 keys("<CR>")
 check(started[#started].prompt == "plain", "plain popup sends no reference")
 started[#started].on_done({})
-io.stderr:write(fails == 0 and "ALL OK\n" or (fails .. " FAILED\n"))
-vim.cmd("qa!")
+t.finish()

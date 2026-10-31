@@ -54,6 +54,10 @@ M.config = {
 
 ---@param opts table|nil
 function M.setup(opts)
+	if vim.fn.has("nvim-0.10") == 0 then
+		vim.notify("harner requires Neovim 0.10 or newer", vim.log.levels.ERROR)
+		return
+	end
 	M.config = vim.tbl_deep_extend("force", M.config, opts or {})
 	math.randomseed(vim.uv.hrtime() % 2147483647)
 

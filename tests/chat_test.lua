@@ -1,7 +1,7 @@
-vim.opt.rtp:prepend(vim.fn.expand("~/.config/nvim"))
+local root = dofile(vim.fs.dirname(debug.getinfo(1, "S").source:sub(2)) .. "/helper.lua").root
 vim.o.columns = 160; vim.o.lines = 50
 require("harner").setup()
-vim.cmd("edit " .. vim.fn.expand("~/.config/nvim/lua/harner/mcp.lua"))
+vim.cmd("edit " .. vim.fn.fnameescape(root .. "/lua/harner/mcp.lua"))
 vim.api.nvim_win_set_cursor(0, { 12, 0 })
 local chat = require("harner.chat")
 chat.open()

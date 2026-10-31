@@ -2,9 +2,12 @@
 
 Neovim plugin (Lua, requires nvim 0.10+, developed on 0.12) that chats with
 `claude -p` from a vertical split. Claude gets an MCP server that reads the
-editor and displays content back in it. Lives in the user's config at
-`~/.config/nvim/lua/harner/`, wired from `~/.config/nvim/init.lua` with a bare
-`require("harner").setup()`; `setup()` registers the global keymaps itself.
+editor and displays content back in it. Standard plugin layout
+(`lua/harner/*.lua`, `tests/`, `README.md`) installed with lazy.nvim: `opts =
+{}` calls `setup()`, which registers the commands and the global keymaps. The
+user's checkout lives at `~/.config/nvim/lua/harner/` and is loaded through a
+`dir =` spec in `~/.config/nvim/lua/plugins.lua` (`event = "VeryLazy"`);
+nothing in the config's own `lua/` tree requires it any more.
 
 One chat session per nvim instance, reachable from any window:
 
@@ -41,6 +44,8 @@ chat.lua ──send──▶ runner.lua ──vim.system──▶ claude -p --ou
    │                                              │ vim.rpcrequest(chan, "nvim_exec_lua", ...)
    └──────── tools.lua (runs in the user's nvim) ◀┘
 ```
+
+All modules live in `lua/harner/`:
 
 - `init.lua` — `M.config` defaults, `setup()` (commands `:Harner`, `:HarnerNew`,
   `:HarnerCancel`, `:HarnerAsk`, the `config.keys` keymaps, which-key group).
@@ -181,7 +186,10 @@ through the nvim tools: `edit_file` lands in the buffer unsaved, disk writes
 
 ## Testing
 
-Headless, run from this directory; every offline test ends with `ALL OK`.
+Headless, run from the repo root; every offline test ends with `ALL OK`. Each
+test starts by `dofile`-ing `tests/helper.lua`, which derives the repo root
+from its own path and prepends it to the rtp (so the checkout can live
+anywhere) and provides `check(cond, msg)` / `finish()`.
 `vim.ui.select`/`vim.ui.input` are stubbed wherever an async tool is exercised
 (headless nvim has no UI for them):
 
@@ -202,8 +210,9 @@ nvim --headless -u NONE -l tests/runner_test.lua
 # full loop against the real claude CLI: three messages, later ones resume (~2 min, costs money)
 nvim --headless -u NONE -l tests/chat_test.lua
 
-# confirm the user's real config registers the commands
-nvim --headless -c 'lua print(vim.fn.exists(":HarnerAsk"), vim.fn.maparg("<leader>hh", "n") ~= "")' -c 'qa!'
+# confirm the user's real config registers the commands (the spec is
+# event = "VeryLazy", so fire it first)
+nvim --headless -c 'doautocmd User VeryLazy' -c 'lua print(vim.fn.exists(":HarnerAsk"), vim.fn.maparg("<leader>hh", "n") ~= "")' -c 'qa!'
 ```
 
 Expected from chat_test: one `_→ nvim:show_text · Hello_` note (not two), a
