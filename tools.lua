@@ -99,26 +99,38 @@ M.tools.show_text = {
 
 local open_ns = vim.api.nvim_create_namespace("harner_open_file")
 
----Resolve a user/Claude supplied path against the cwd and make sure it exists.
+---Resolve a user/Claude supplied path against the cwd. The file may not exist
+---yet; a directory is an error.
 ---@param path string
----@return string|nil abs, string|nil err
-local function resolve_path(path)
+---@return string|nil abs, string|nil err, table|nil stat
+local function resolve_any_path(path)
 	if type(path) ~= "string" or path == "" then
 		return nil, "path is required"
 	end
-	path = vim.fn.expand(path)
-	if not vim.startswith(path, "/") then
-		path = vim.fs.joinpath(vim.fn.getcwd(), path)
-	end
+	-- normalize() expands ~ and $VAR; vim.fn.expand() would also interpret % # and wildcards
 	path = vim.fs.normalize(path)
-	local st = vim.uv.fs_stat(path)
-	if not st then
-		return nil, "no such file: " .. path
+	if not vim.startswith(path, "/") then
+		path = vim.fs.normalize(vim.fs.joinpath(vim.fn.getcwd(), path))
 	end
-	if st.type == "directory" then
+	local st = vim.uv.fs_stat(path)
+	if st and st.type == "directory" then
 		return nil, "is a directory: " .. path
 	end
-	return path
+	return path, nil, st
+end
+
+---Like resolve_any_path but the file must exist.
+---@param path string
+---@return string|nil abs, string|nil err
+local function resolve_path(path)
+	local abs, err, st = resolve_any_path(path)
+	if not abs then
+		return nil, err
+	end
+	if not st then
+		return nil, "no such file: " .. abs
+	end
+	return abs
 end
 
 M.tools.open_file = {
@@ -411,6 +423,443 @@ M.tools.run_command = {
 				run()
 			else
 				resolve("The user declined to run `:" .. cmd .. "`.", true)
+			end
+		end)
+	end,
+}
+
+-- ---------------------------------------------------------------------------
+-- Editing: edit_file changes the buffer in place (unsaved, undoable); write_file
+-- and save_file touch the disk and ask the user first.
+
+---Split text into lines; a trailing newline does not produce an empty last line.
+---@param s string
+---@return string[]
+local function content_lines(s)
+	local lines = vim.split(s or "", "\n", { plain = true })
+	if #lines > 1 and lines[#lines] == "" then
+		table.remove(lines)
+	end
+	if #lines == 1 and lines[1] == "" then
+		return {}
+	end
+	return lines
+end
+
+---Load (or find) the buffer for an existing file without showing it.
+---@param path string
+---@return integer buf
+local function load_buf(path)
+	local buf = vim.fn.bufadd(path)
+	vim.fn.bufload(buf)
+	vim.bo[buf].buflisted = true
+	return buf
+end
+
+local function rel(path)
+	return vim.fn.fnamemodify(path, ":.")
+end
+
+---The loaded buffer for `path`, if any. Names are compared exactly (bufnr()
+---would treat the path as a pattern); nvim stores buffer names with symlinks
+---resolved (/var -> /private/var on macOS), so the real path is accepted too.
+---@param path string
+---@return integer|nil
+local function loaded_buf(path)
+	local real = vim.uv.fs_realpath(path) or path
+	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+		if vim.api.nvim_buf_is_loaded(buf) then
+			local name = vim.api.nvim_buf_get_name(buf)
+			if name == path or name == real then
+				return buf
+			end
+		end
+	end
+	return nil
+end
+
+---Ask the user before a disk write unless config.write_file.confirm is off.
+---@param prompt string
+---@param yes string label of the confirming choice
+---@param cb fun(ok:boolean)
+local function confirm(prompt, yes, cb)
+	if not require("harner").config.write_file.confirm then
+		cb(true)
+		return
+	end
+	vim.ui.select({ yes, "skip" }, { prompt = prompt }, function(choice)
+		cb(choice == yes)
+	end)
+end
+
+---Byte offsets of every exact occurrence of `needle` in `text`.
+local function find_all(text, needle)
+	local hits, init = {}, 1
+	while true do
+		local s, e = text:find(needle, init, true)
+		if not s then
+			return hits
+		end
+		hits[#hits + 1] = { s, e }
+		init = e + 1
+	end
+end
+
+---Whole-line matches of `old` in `lines` after normalising each line with `norm`.
+---@return integer[] start indices (1-based)
+local function find_line_matches(lines, old, norm)
+	local normed = vim.tbl_map(norm, old)
+	local hits = {}
+	for i = 1, #lines - #old + 1 do
+		local ok = true
+		for j = 1, #old do
+			if norm(lines[i + j - 1]) ~= normed[j] then
+				ok = false
+				break
+			end
+		end
+		if ok then
+			hits[#hits + 1] = i
+		end
+	end
+	return hits
+end
+
+local function leading_ws(line)
+	return line:match("^[ \t]*")
+end
+
+---Re-indent `new` so it fits where `old` matched after indentation-insensitive
+---matching: the first matched file line sets the base, further levels follow
+---the file's style (tabs, or `sw` spaces per level).
+---@param new string[] replacement lines (Claude's indentation)
+---@param old string[] old_str lines (Claude's indentation)
+---@param matched string[] the file lines that matched
+---@param sw integer
+---@return string[]
+local function reindent(new, old, matched, sw)
+	local function width(ws)
+		local w = 0
+		for c in ws:gmatch(".") do
+			w = w + (c == "\t" and sw or 1)
+		end
+		return w
+	end
+	local function first_nonblank(ls)
+		for _, l in ipairs(ls) do
+			if l:match("%S") then
+				return l
+			end
+		end
+		return ls[1] or ""
+	end
+	local file_base = leading_ws(first_nonblank(matched))
+	local use_tabs = file_base:find("\t") ~= nil
+	if file_base == "" then
+		for _, l in ipairs(matched) do
+			if leading_ws(l):find("\t") then
+				use_tabs = true
+			end
+		end
+	end
+	local old_base_w = width(leading_ws(first_nonblank(old)))
+	-- Claude's indent unit: smallest positive difference between indent widths
+	local widths, unit = {}, nil
+	for _, l in ipairs(old) do
+		if l:match("%S") then
+			widths[#widths + 1] = width(leading_ws(l))
+		end
+	end
+	for _, l in ipairs(new) do
+		if l:match("%S") then
+			widths[#widths + 1] = width(leading_ws(l))
+		end
+	end
+	table.sort(widths)
+	for i = 2, #widths do
+		local d = widths[i] - widths[i - 1]
+		if d > 0 and (unit == nil or d < unit) then
+			unit = d
+		end
+	end
+	unit = unit or sw
+	local base_levels = use_tabs and #file_base or math.floor(width(file_base) / sw)
+	local out = {}
+	for i, l in ipairs(new) do
+		if not l:match("%S") then
+			out[i] = ""
+		else
+			local ws = leading_ws(l)
+			local levels = base_levels + math.floor((width(ws) - old_base_w) / unit + 0.5)
+			levels = math.max(0, levels)
+			local indent = use_tabs and string.rep("\t", levels) or string.rep(" ", levels * sw)
+			out[i] = indent .. l:sub(#ws + 1)
+		end
+	end
+	return out
+end
+
+---Row/col (0-based) of a byte offset in `text` given line start offsets.
+local function offset_to_pos(starts, off)
+	local lo, hi = 1, #starts
+	while lo < hi do
+		local mid = math.ceil((lo + hi) / 2)
+		if starts[mid] <= off then
+			lo = mid
+		else
+			hi = mid - 1
+		end
+	end
+	return lo - 1, off - starts[lo]
+end
+
+M.tools.edit_file = {
+	description = "Replace text in a file: `old_str` must match exactly once (copy it verbatim from the file, with "
+		.. "enough surrounding lines to be unique) and is replaced by `new_str`. Set `replace_all` to change every "
+		.. "occurrence. The change is applied to the editor buffer immediately and left unsaved so the user can "
+		.. "review and undo it; call save_file to write it to disk when asked to. Prefer several small edits over "
+		.. "rewriting a file; use write_file only for new files or complete rewrites.",
+	inputSchema = schema({
+		path = { type = "string", description = "File path, absolute or relative to the working directory" },
+		old_str = { type = "string", description = "Exact text to replace" },
+		new_str = { type = "string", description = "Replacement text" },
+		replace_all = { type = "boolean", description = "Replace every occurrence instead of requiring exactly one" },
+	}, { "path", "old_str", "new_str" }),
+	handler = function(args)
+		local path, err = resolve_path(args.path)
+		if not path then
+			error(err, 0)
+		end
+		local old, new = args.old_str, args.new_str
+		if type(old) ~= "string" or old == "" then
+			error("old_str is required", 0)
+		end
+		if type(new) ~= "string" then
+			error("new_str is required", 0)
+		end
+		if old == new then
+			error("old_str and new_str are identical", 0)
+		end
+		local buf = load_buf(path)
+		local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+		local text = table.concat(lines, "\n")
+		local name = rel(path)
+
+		-- 1. exact substring match
+		local hits = find_all(text, old)
+		if #hits > 1 and not args.replace_all then
+			error(
+				string.format(
+					"old_str matches %d places in %s; include more surrounding lines so it is unique, or set replace_all",
+					#hits,
+					name
+				),
+				0
+			)
+		end
+		if #hits > 0 then
+			local starts, off = {}, 1
+			for i, l in ipairs(lines) do
+				starts[i] = off
+				off = off + #l + 1
+			end
+			local new_lines = vim.split(new, "\n", { plain = true })
+			local first_row
+			for i = #hits, 1, -1 do
+				local srow, scol = offset_to_pos(starts, hits[i][1])
+				local erow, ecol = offset_to_pos(starts, hits[i][2] + 1)
+				vim.api.nvim_buf_set_text(buf, srow, scol, erow, ecol, new_lines)
+				first_row = srow
+			end
+			local n = #new_lines
+			if n > 1 and new_lines[n] == "" then
+				n = n - 1 -- new_str ended with a newline
+			end
+			local last_row = first_row + n - 1
+			return string.format(
+				"Edited %s: replaced %d occurrence%s (now lines %d-%d). The buffer is modified but not saved; "
+					.. "the user can review it, or call save_file to write it.",
+				name,
+				#hits,
+				#hits == 1 and "" or "s",
+				first_row + 1,
+				last_row + 1
+			)
+		end
+
+		-- 2. whole-line match ignoring trailing, then all leading/trailing whitespace
+		-- (not for whitespace-only old_str: it would match every blank line)
+		local old_lines = content_lines(old)
+		local new_lines = content_lines(new)
+		local levels = vim.trim(old) == "" and {} or {
+			{ "trailing whitespace", function(l)
+				return (l:gsub("[ \t]+$", ""))
+			end, false },
+			{ "indentation", vim.trim, true },
+		}
+		for _, lvl in ipairs(levels) do
+			local label, norm, fix_indent = lvl[1], lvl[2], lvl[3]
+			local starts = find_line_matches(lines, old_lines, norm)
+			if #starts > 1 and not args.replace_all then
+				error(
+					string.format(
+						"old_str matches %d places in %s (ignoring %s); include more surrounding lines so it is unique",
+						#starts,
+						name,
+						label
+					),
+					0
+				)
+			end
+			if #starts > 0 then
+				local sw = vim.bo[buf].shiftwidth
+				if sw == 0 then
+					sw = vim.bo[buf].tabstop
+				end
+				local first
+				for i = #starts, 1, -1 do
+					local s = starts[i]
+					local repl = new_lines
+					if fix_indent then
+						local matched = vim.list_slice(lines, s, s + #old_lines - 1)
+						repl = reindent(new_lines, old_lines, matched, sw)
+					end
+					vim.api.nvim_buf_set_lines(buf, s - 1, s - 1 + #old_lines, false, repl)
+					first = s
+				end
+				return string.format(
+					"Edited %s: replaced %d occurrence%s (now lines %d-%d; old_str matched only after ignoring %s, "
+						.. "re-read the file before further edits). The buffer is modified but not saved; the user can "
+						.. "review it, or call save_file to write it.",
+					name,
+					#starts,
+					#starts == 1 and "" or "s",
+					first,
+					first + #new_lines - 1,
+					label
+				)
+			end
+		end
+		error(
+			string.format(
+				"old_str was not found in %s. The file may have changed: read it again and copy the text exactly.",
+				name
+			),
+			0
+		)
+	end,
+}
+
+---Save a loaded buffer to its file.
+---@param buf integer
+---@return string|nil err
+local function write_buf(buf)
+	local ok, e = pcall(vim.api.nvim_buf_call, buf, function()
+		vim.cmd("silent write")
+	end)
+	return (not ok) and tostring(e) or nil
+end
+
+---Write `lines` to `path`, through the buffer when one is loaded so it stays in sync.
+---@return string|nil err
+local function write_lines(path, lines)
+	local buf = loaded_buf(path)
+	if buf then
+		vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+		return write_buf(buf)
+	end
+	if vim.fn.writefile(lines, path) ~= 0 then
+		return "writefile failed for " .. path
+	end
+	return nil
+end
+
+M.tools.write_file = {
+	description = "Create a file or replace its whole contents; the user confirms the write first. Use it for new "
+		.. "files or complete rewrites, and edit_file for changes to existing files.",
+	inputSchema = schema({
+		path = { type = "string", description = "File path, absolute or relative to the working directory" },
+		content = { type = "string", description = "The full file contents" },
+		create_dirs = { type = "boolean", description = "Create missing parent directories" },
+	}, { "path", "content" }),
+	async = true,
+	handler = function(args, resolve)
+		local path, err, st = resolve_any_path(args.path)
+		if not path then
+			error(err, 0)
+		end
+		if type(args.content) ~= "string" then
+			error("content is required", 0)
+		end
+		local dir = vim.fs.dirname(path)
+		if not vim.uv.fs_stat(dir) then
+			if not args.create_dirs then
+				error("directory does not exist: " .. dir .. " (set create_dirs to create it)", 0)
+			end
+		end
+		local lines = content_lines(args.content)
+		local name = rel(path)
+		local what
+		if st then
+			local buf = loaded_buf(path)
+			local old_n = buf and vim.api.nvim_buf_line_count(buf) or #vim.fn.readfile(path)
+			what = string.format("replaces %d lines with %d", old_n, #lines)
+			if buf and vim.bo[buf].modified then
+				what = what .. ", discarding unsaved changes in the buffer"
+			end
+		else
+			what = string.format("new file, %d lines", #lines)
+		end
+		confirm(string.format("harner: Claude wants to write %s (%s)", name, what), "write", function(ok)
+			if not ok then
+				resolve("The user declined to write " .. name .. ".", true)
+				return
+			end
+			local ok2, werr = pcall(function()
+				if not vim.uv.fs_stat(dir) then
+					vim.fn.mkdir(dir, "p")
+				end
+				return write_lines(path, lines)
+			end)
+			if not ok2 or werr then
+				resolve("Writing " .. name .. " failed: " .. tostring(werr), true)
+			else
+				resolve(string.format("Wrote %s (%d lines).", name, #lines))
+			end
+		end)
+	end,
+}
+
+M.tools.save_file = {
+	description = "Save a buffer with unsaved changes (for example after edit_file) to disk; the user confirms first.",
+	inputSchema = schema({
+		path = { type = "string", description = "File path, absolute or relative to the working directory" },
+	}, { "path" }),
+	async = true,
+	handler = function(args, resolve)
+		local path, err = resolve_any_path(args.path)
+		if not path then
+			error(err, 0)
+		end
+		local name = rel(path)
+		local buf = loaded_buf(path)
+		if not buf then
+			error(name .. " is not open in the editor", 0)
+		end
+		if not vim.bo[buf].modified then
+			resolve(name .. " has no unsaved changes.")
+			return
+		end
+		confirm("harner: Claude wants to save " .. name, "save", function(ok)
+			if not ok then
+				resolve("The user declined to save " .. name .. ".", true)
+				return
+			end
+			local werr = write_buf(buf)
+			if werr then
+				resolve("Saving " .. name .. " failed: " .. werr, true)
+			else
+				resolve(string.format("Saved %s (%d lines).", name, vim.api.nvim_buf_line_count(buf)))
 			end
 		end)
 	end,

@@ -29,6 +29,11 @@ M.config = {
 		confirm = true,
 		allow = { "edit", "Telescope", "DiffviewOpen", "Git blame", "Git log", "Git diff" },
 	},
+	-- disk writes (write_file and save_file): ask the user (vim.ui.select) first.
+	-- edit_file never asks: it changes the buffer, unsaved and undoable.
+	write_file = {
+		confirm = true,
+	},
 	-- global normal-mode keymaps; set one to false to skip it
 	keys = {
 		group = "<leader>h", -- which-key group label, false to skip

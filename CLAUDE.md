@@ -94,7 +94,25 @@ chat.lua ──send──▶ runner.lua ──vim.system──▶ claude -p --ou
 
 Tools today: `show_text`, `open_file` (display); `get_current_buffer`,
 `get_cursor`, `get_selection`, `list_buffers`, `get_diagnostics` (read
-context); `ask_user`, `run_command` (async, wait on the user).
+context); `edit_file` (sync, edits the buffer); `ask_user`, `run_command`,
+`write_file`, `save_file` (async, wait on the user).
+
+Editing follows the `str_replace` shape the models are trained on: `edit_file`
+takes `path`, `old_str`, `new_str`, optional `replace_all`. It loads the file
+into a (listed, hidden) buffer with `bufadd`/`bufload` and edits it with
+`nvim_buf_set_text`, so the change is unsaved and undoable and LSP sees it.
+`old_str` must match exactly once (error names the count and asks for more
+context, or "not found, read it again"). When the exact match fails it retries
+whole-line matching ignoring trailing whitespace, then ignoring indentation;
+the latter re-indents `new_str` to the file's style (`reindent()`: tabs or
+`shiftwidth` spaces per level, levels inferred from Claude's own indentation).
+The result text says which fallback matched. `write_file` (`path`, `content`,
+`create_dirs`) replaces or creates a whole file and `save_file` (`path`)
+writes a modified buffer; both ask through `vim.ui.select({"write"|"save",
+"skip"})` unless `config.write_file.confirm = false`. Writes go through the
+buffer when one is loaded (`silent write`) so buffer and disk stay in sync,
+otherwise `writefile`. The system note carries Anthropic's "surgically edit a
+file rather than rewrite" line, which matters most on Fable.
 
 `open_file` resolves relative paths against `getcwd()`, opens in `target_win()`
 (`split` first if that buffer is modified), centres the line and highlights the
@@ -108,7 +126,7 @@ confirms through `vim.ui.select({"run","skip"})`. `config.run_command.confirm
 Tool notes in the transcript are `_→ nvim:show_text_` on `content_block_start`
 and get amended to `_→ nvim:show_text · <summary>_` when the input arrives
 (`chat.tool_line` remembers the line; `tool_summary()` picks title / path:line /
-question / `:cmd` / file_path / url). Text that follows a note starts a new
+question / `:cmd` / file tail for edit_file, write_file, save_file / file_path / url). Text that follows a note starts a new
 paragraph.
 
 ## Permissions model
@@ -117,7 +135,9 @@ Headless Claude silently denies anything not pre-approved. We pass
 `--tools Read,Grep,Glob,WebFetch` (restricts the built-in set, so no Edit /
 Write / Bash exist at all) and `--allowedTools Read,Grep,Glob,WebFetch,mcp__nvim`
 (`mcp__nvim` approves every tool of the server named `nvim`). The server name in
-`mcp.lua` and the allow-list entry must stay in sync.
+`mcp.lua` and the allow-list entry must stay in sync. File changes only happen
+through the nvim tools: `edit_file` lands in the buffer unsaved, disk writes
+(`write_file`, `save_file`) are confirmed by the user.
 
 ## Conventions and gotchas
 
@@ -163,7 +183,9 @@ Headless, run from this directory; every offline test ends with `ALL OK`.
 
 ```sh
 # bridge round trip: initialize, tools/list, show_text, open_file, ask_user,
-# run_command (confirmed / declined / allow-listed / bad), cancel path (fast, offline)
+# run_command (confirmed / declined / allow-listed / bad), edit_file (exact /
+# whitespace fallbacks / ambiguous / missing / replace_all), write_file
+# (confirmed / declined / create_dirs), save_file, cancel path (fast, offline)
 nvim --headless -u NONE -l tests/bridge_test.lua
 
 # popup + <leader>h keymaps, offline; the only test that stubs the runner

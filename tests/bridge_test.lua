@@ -1,6 +1,7 @@
 vim.opt.rtp:prepend(vim.fn.expand("~/.config/nvim"))
 -- Bridge round-trip test: initialize, tools/list, every tool category
--- (display, open_file, async ask_user / run_command), error paths. Offline.
+-- (display, open_file, edit_file / write_file / save_file, async ask_user /
+-- run_command), error paths. Offline.
 -- vim.ui.select / vim.ui.input are stubbed and answer after a short delay so
 -- the async path really goes through the bridge's poll loop.
 require("harner").setup({ show_text = { mode = "split" } })
@@ -25,6 +26,29 @@ vim.ui.input = function(opts, cb)
   vim.defer_fn(function() cb("typed answer") end, 150)
 end
 
+-- fixtures for edit_file / write_file / save_file
+local tmp = vim.fn.tempname() .. "-harner-edit"
+vim.fn.mkdir(tmp, "p")
+local edit_path = tmp .. "/edit.lua"
+vim.fn.writefile({
+  "local function greet(name)",
+  "\tif name == \"\" then",
+  "\t\treturn \"hello\"",
+  "\tend",
+  "\treturn \"hello \" .. name",
+  "end",
+  "",
+  "local x = 1",
+  "local x = 1",
+  "",
+  "\t\tdeep = true",
+}, edit_path)
+-- a second file, already open in a buffer, for write_file through a loaded buffer
+local other_path = tmp .. "/other.lua"
+vim.fn.writefile({ "one", "two", "three" }, other_path)
+local obuf = vim.fn.bufadd(other_path)
+vim.fn.bufload(obuf)
+
 local reqs = {
   { jsonrpc = "2.0", id = 1, method = "initialize", params = { protocolVersion = "2025-06-18", capabilities = {}, clientInfo = { name = "t", version = "0" } } },
   { jsonrpc = "2.0", method = "notifications/initialized" },
@@ -41,6 +65,22 @@ local reqs = {
   { jsonrpc = "2.0", id = 14, method = "tools/call", params = { name = "ask_user", arguments = {} } },
   { jsonrpc = "2.0", id = 6, method = "tools/call", params = { name = "open_file", arguments = { path = "mcp.lua", line = 12, end_line = 14 } } },
   { jsonrpc = "2.0", id = 7, method = "tools/call", params = { name = "open_file", arguments = { path = "does/not/exist.lua" } } },
+  { jsonrpc = "2.0", id = 20, method = "tools/call", params = { name = "edit_file", arguments = { path = edit_path, old_str = "\t\treturn \"hello\"\n", new_str = "\t\treturn \"hi\"\n" } } },
+  { jsonrpc = "2.0", id = 21, method = "tools/call", params = { name = "edit_file", arguments = { path = edit_path, old_str = "greet(name)", new_str = "greet(who)" } } },
+  { jsonrpc = "2.0", id = 22, method = "tools/call", params = { name = "edit_file", arguments = { path = edit_path, old_str = "    return \"hello \" .. name", new_str = "    local out = \"hello \" .. name\n        .. \"!\"\n    return out" } } },
+  { jsonrpc = "2.0", id = 23, method = "tools/call", params = { name = "edit_file", arguments = { path = edit_path, old_str = "local x = 1", new_str = "local y = 2" } } },
+  { jsonrpc = "2.0", id = 24, method = "tools/call", params = { name = "edit_file", arguments = { path = edit_path, old_str = "local x = 1", new_str = "local y = 2", replace_all = true } } },
+  { jsonrpc = "2.0", id = 25, method = "tools/call", params = { name = "edit_file", arguments = { path = edit_path, old_str = "nope nope", new_str = "x" } } },
+  { jsonrpc = "2.0", id = 26, method = "tools/call", params = { name = "edit_file", arguments = { path = tmp .. "/missing.lua", old_str = "a", new_str = "b" } } },
+  { jsonrpc = "2.0", id = 34, method = "tools/call", params = { name = "edit_file", arguments = { path = edit_path, old_str = "   ", new_str = "x", replace_all = true } } },
+  { jsonrpc = "2.0", id = 35, method = "tools/call", params = { name = "edit_file", arguments = { path = edit_path, old_str = "\n        deep = true", new_str = "\n        deep = false\n            more = 1" } } },
+  { jsonrpc = "2.0", id = 27, method = "tools/call", params = { name = "save_file", arguments = { path = edit_path } } },
+  { jsonrpc = "2.0", id = 28, method = "tools/call", params = { name = "write_file", arguments = { path = tmp .. "/new.txt", content = "a\nb\n" } } },
+  { jsonrpc = "2.0", id = 29, method = "tools/call", params = { name = "write_file", arguments = { path = tmp .. "/decline-me.txt", content = "x" } } },
+  { jsonrpc = "2.0", id = 30, method = "tools/call", params = { name = "write_file", arguments = { path = tmp .. "/sub/dir/deep.txt", content = "deep" } } },
+  { jsonrpc = "2.0", id = 31, method = "tools/call", params = { name = "write_file", arguments = { path = tmp .. "/sub/dir/deep.txt", content = "deep", create_dirs = true } } },
+  { jsonrpc = "2.0", id = 32, method = "tools/call", params = { name = "save_file", arguments = { path = tmp .. "/new.txt" } } },
+  { jsonrpc = "2.0", id = 33, method = "tools/call", params = { name = "write_file", arguments = { path = other_path, content = "-- gone\n" } } },
 }
 local input = {}
 for _, r in ipairs(reqs) do input[#input + 1] = vim.json.encode(r) end
@@ -65,7 +105,7 @@ local function is_err(id) local r = replies[id]; return r and r.result and r.res
 check(done, "bridge exited")
 check(replies[1] and replies[1].result.serverInfo ~= nil, "initialize answered")
 local names = vim.tbl_map(function(t) return t.name end, replies[2].result.tools)
-check(vim.deep_equal(names, { "ask_user", "get_current_buffer", "get_cursor", "get_diagnostics", "get_selection", "list_buffers", "open_file", "run_command", "show_text" }), "tools/list names: " .. table.concat(names, ","))
+check(vim.deep_equal(names, { "ask_user", "edit_file", "get_current_buffer", "get_cursor", "get_diagnostics", "get_selection", "list_buffers", "open_file", "run_command", "save_file", "show_text", "write_file" }), "tools/list names: " .. table.concat(names, ","))
 check(text(3):find("Displayed 2 lines", 1, true) ~= nil and not is_err(3), "show_text: " .. text(3))
 check(is_err(4) and text(4):find("unknown tool", 1, true), "unknown tool is an error result")
 check(replies[5] and replies[5].error and replies[5].error.code == -32601, "unknown method is a jsonrpc error")
@@ -91,6 +131,34 @@ check(is_err(14) and text(14):find("question is required", 1, true), "ask_user w
 local confirm_prompts = vim.tbl_filter(function(p) return p:find("wants to run", 1, true) end, ui_prompts)
 check(#confirm_prompts == 3, "confirm asked exactly for the three non-allow-listed commands, got " .. #confirm_prompts)
 check(require("harner.tools").pending_count() == 0, "no pending calls left")
+
+-- edit_file / save_file / write_file
+local ebuf = vim.fn.bufnr(edit_path)
+check(ebuf > 0 and vim.api.nvim_buf_is_loaded(ebuf) and vim.bo[ebuf].buflisted, "edit_file loaded the file into a listed buffer")
+local disk = vim.fn.readfile(edit_path)
+check(text(20):find("replaced 1 occurrence (now lines 3-3)", 1, true) ~= nil and not is_err(20), "edit_file exact multi-line: " .. text(20))
+check(text(21):find("now lines 1-1", 1, true) ~= nil and not is_err(21), "edit_file partial-line match: " .. text(21))
+check(disk[1] == "local function greet(who)" and disk[3] == "\t\treturn \"hi\"", "exact edits landed: " .. disk[1] .. " | " .. disk[3])
+check(text(22):find("ignoring indentation", 1, true) ~= nil and not is_err(22), "edit_file indentation fallback reported: " .. text(22))
+check(vim.deep_equal({ disk[5], disk[6], disk[7] }, { "\tlocal out = \"hello \" .. name", "\t\t.. \"!\"", "\treturn out" }), "indentation fallback re-indented with tabs: " .. vim.inspect({ disk[5], disk[6], disk[7] }))
+check(is_err(23) and text(23):find("matches 2 places", 1, true), "edit_file ambiguous old_str errors: " .. text(23))
+check(text(24):find("replaced 2 occurrences", 1, true) ~= nil and not is_err(24), "edit_file replace_all: " .. text(24))
+check(disk[10] == "local y = 2" and disk[11] == "local y = 2", "replace_all changed both lines")
+check(is_err(25) and text(25):find("not found", 1, true), "edit_file missing old_str errors: " .. text(25))
+check(is_err(26) and text(26):find("no such file", 1, true), "edit_file missing file errors: " .. text(26))
+check(is_err(34) and text(34):find("not found", 1, true), "edit_file whitespace-only old_str is not found: " .. text(34))
+check(not is_err(35) and disk[13] == "\t\tdeep = false" and disk[14] == "\t\t\tmore = 1", "indentation fallback with a leading blank line keeps the base indent: " .. vim.inspect({ disk[13], disk[14] }))
+check(text(27):find("^Saved .*%(14 lines%)") ~= nil and not is_err(27), "save_file wrote the buffer: " .. text(27))
+check(text(28):find("Wrote", 1, true) ~= nil and vim.deep_equal(vim.fn.readfile(tmp .. "/new.txt"), { "a", "b" }), "write_file created new.txt: " .. text(28))
+check(is_err(29) and text(29):find("declined", 1, true) and vim.uv.fs_stat(tmp .. "/decline-me.txt") == nil, "write_file declined leaves no file: " .. text(29))
+check(is_err(30) and text(30):find("directory does not exist", 1, true), "write_file missing dir errors without create_dirs: " .. text(30))
+check(not is_err(31) and vim.deep_equal(vim.fn.readfile(tmp .. "/sub/dir/deep.txt"), { "deep" }), "write_file create_dirs: " .. text(31))
+check(is_err(32) and text(32):find("not open", 1, true), "save_file on a file without a buffer errors: " .. text(32))
+check(not is_err(33) and vim.deep_equal(vim.fn.readfile(other_path), { "-- gone" }) and vim.deep_equal(vim.api.nvim_buf_get_lines(obuf, 0, -1, false), { "-- gone" }) and not vim.bo[obuf].modified, "write_file through a loaded buffer syncs buffer and disk: " .. text(33))
+local write_prompts = vim.tbl_filter(function(p) return p:find("wants to write", 1, true) end, ui_prompts)
+local save_prompts = vim.tbl_filter(function(p) return p:find("wants to save", 1, true) end, ui_prompts)
+check(#write_prompts == 4 and #save_prompts == 1, "confirm asked for 4 writes and 1 save, got " .. #write_prompts .. "/" .. #save_prompts)
+vim.fn.delete(tmp, "rf")
 
 -- cancel path: a pending ask resolves with an error and poll hands it over
 local tools = require("harner.tools")

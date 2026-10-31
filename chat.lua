@@ -179,6 +179,8 @@ local function tool_summary(name, input)
 				s = s .. "-" .. input.end_line
 			end
 		end
+	elseif n == "nvim:edit_file" or n == "nvim:write_file" or n == "nvim:save_file" then
+		s = input.path and vim.fn.fnamemodify(input.path, ":t") or nil
 	elseif n == "nvim:ask_user" then
 		s = input.question
 	elseif n == "nvim:run_command" then

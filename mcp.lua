@@ -43,12 +43,16 @@ function M.system_note(cwd)
 		"Tools prefixed mcp__nvim__ give you the editor: get_current_buffer, get_cursor, get_selection, list_buffers,",
 		"get_diagnostics to read what the user is looking at; show_text to display content to them; open_file to jump",
 		"the editor to a file and line range; ask_user to ask a question and wait for the answer; run_command to run an",
-		"Ex command (the user confirms it unless it is on their allow-list).",
+		"Ex command (the user confirms it unless it is on their allow-list); edit_file, write_file and save_file to change files.",
 		"When the user says 'this', 'here', 'the selection' or similar, read the editor first instead of guessing.",
 		"A prompt may end with a 'Selection: <path> lines N-M' line: that is a reference, not the text; call get_selection to read those lines before answering.",
 		"Use show_text for anything longer than a few lines (code, diffs, generated files, tables) and keep the chat reply brief.",
 		"When you point at code, prefer open_file over quoting it. Use ask_user only for decisions you cannot make from the editor.",
-		"You cannot edit files or run shell commands in this mode; present proposed changes with show_text (filetype diff or the language).",
+		"To change a file, read it first, then call edit_file with old_str copied exactly from the file (enough lines to be unique) and new_str.",
+		"The number of tokens used to edit files is best minimized, all else being equal. Therefore, when it will not affect the end result, try to surgically edit a file rather than rewrite the entire thing.",
+		"edit_file changes the editor buffer without saving; the user reviews and saves, or call save_file when they ask for the change to be written.",
+		"write_file (confirmed by the user) is for new files or complete rewrites only. There are no shell commands in this mode.",
+		"When only discussing a change, show it with show_text (filetype diff or the language) instead of editing.",
 		"Working directory: " .. cwd,
 	}, " ")
 end
