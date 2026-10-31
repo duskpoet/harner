@@ -27,8 +27,9 @@ Selection handling is by reference, not by pasting: the popup title shows
 `'<`/`'>` marks of the target window, so the two must stay consistent (the
 visual mapping leaves visual mode first so the marks are set).
 
-Not a git repo. The interactive Claude Code integration is a separate plugin
-(`coder/claudecode.nvim`); harner is only the headless `-p` path.
+Its own git repo (the enclosing `~/.config/nvim` is not one). The interactive
+Claude Code integration is a separate plugin (`coder/claudecode.nvim`); harner
+is only the headless `-p` path.
 
 ## Architecture
 
