@@ -101,6 +101,9 @@ Editing follows the `str_replace` shape the models are trained on: `edit_file`
 takes `path`, `old_str`, `new_str`, optional `replace_all`. It loads the file
 into a (listed, hidden) buffer with `bufadd`/`bufload` and edits it with
 `nvim_buf_set_text`, so the change is unsaved and undoable and LSP sees it.
+After a successful edit the buffer is shown in `target_win()` with the cursor
+on the replaced lines and the same `Visual` highlight as `open_file`
+(`show_range()`, shared by both tools), so the user sees the unsaved change.
 `old_str` must match exactly once (error names the count and asks for more
 context, or "not found, read it again"). When the exact match fails it retries
 whole-line matching ignoring trailing whitespace, then ignoring indentation;
@@ -114,10 +117,11 @@ buffer when one is loaded (`silent write`) so buffer and disk stay in sync,
 otherwise `writefile`. The system note carries Anthropic's "surgically edit a
 file rather than rewrite" line, which matters most on Fable.
 
-`open_file` resolves relative paths against `getcwd()`, opens in `target_win()`
-(`split` first if that buffer is modified), centres the line and highlights the
-range with a `Visual` extmark in the `harner_open_file` namespace that clears
-once the cursor leaves the range. `run_command` runs an Ex command with
+`open_file` resolves relative paths against `getcwd()` and calls
+`show_range()`: show the buffer in `target_win()` (`split` first if that window
+holds another modified buffer), centre the line and highlight the range with a
+`Visual` extmark in the `harner_open_file` namespace that clears once the
+cursor leaves the range. `run_command` runs an Ex command with
 `nvim_exec2` in `target_win()`; unless it starts with an entry of
 `config.run_command.allow` (whole-word prefix match, e.g. `Git log`) the user
 confirms through `vim.ui.select({"run","skip"})`. `config.run_command.confirm

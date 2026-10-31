@@ -63,8 +63,6 @@ local reqs = {
   { jsonrpc = "2.0", id = 12, method = "tools/call", params = { name = "run_command", arguments = { cmd = "edit tools.lua" } } },
   { jsonrpc = "2.0", id = 13, method = "tools/call", params = { name = "run_command", arguments = { cmd = "NoSuchCommandHere" } } },
   { jsonrpc = "2.0", id = 14, method = "tools/call", params = { name = "ask_user", arguments = {} } },
-  { jsonrpc = "2.0", id = 6, method = "tools/call", params = { name = "open_file", arguments = { path = "mcp.lua", line = 12, end_line = 14 } } },
-  { jsonrpc = "2.0", id = 7, method = "tools/call", params = { name = "open_file", arguments = { path = "does/not/exist.lua" } } },
   { jsonrpc = "2.0", id = 20, method = "tools/call", params = { name = "edit_file", arguments = { path = edit_path, old_str = "\t\treturn \"hello\"\n", new_str = "\t\treturn \"hi\"\n" } } },
   { jsonrpc = "2.0", id = 21, method = "tools/call", params = { name = "edit_file", arguments = { path = edit_path, old_str = "greet(name)", new_str = "greet(who)" } } },
   { jsonrpc = "2.0", id = 22, method = "tools/call", params = { name = "edit_file", arguments = { path = edit_path, old_str = "    return \"hello \" .. name", new_str = "    local out = \"hello \" .. name\n        .. \"!\"\n    return out" } } },
@@ -74,6 +72,8 @@ local reqs = {
   { jsonrpc = "2.0", id = 26, method = "tools/call", params = { name = "edit_file", arguments = { path = tmp .. "/missing.lua", old_str = "a", new_str = "b" } } },
   { jsonrpc = "2.0", id = 34, method = "tools/call", params = { name = "edit_file", arguments = { path = edit_path, old_str = "   ", new_str = "x", replace_all = true } } },
   { jsonrpc = "2.0", id = 35, method = "tools/call", params = { name = "edit_file", arguments = { path = edit_path, old_str = "\n        deep = true", new_str = "\n        deep = false\n            more = 1" } } },
+  { jsonrpc = "2.0", id = 6, method = "tools/call", params = { name = "open_file", arguments = { path = "mcp.lua", line = 12, end_line = 14 } } },
+  { jsonrpc = "2.0", id = 7, method = "tools/call", params = { name = "open_file", arguments = { path = "does/not/exist.lua" } } },
   { jsonrpc = "2.0", id = 27, method = "tools/call", params = { name = "save_file", arguments = { path = edit_path } } },
   { jsonrpc = "2.0", id = 28, method = "tools/call", params = { name = "write_file", arguments = { path = tmp .. "/new.txt", content = "a\nb\n" } } },
   { jsonrpc = "2.0", id = 29, method = "tools/call", params = { name = "write_file", arguments = { path = tmp .. "/decline-me.txt", content = "x" } } },
@@ -136,7 +136,7 @@ check(require("harner.tools").pending_count() == 0, "no pending calls left")
 local ebuf = vim.fn.bufnr(edit_path)
 check(ebuf > 0 and vim.api.nvim_buf_is_loaded(ebuf) and vim.bo[ebuf].buflisted, "edit_file loaded the file into a listed buffer")
 local disk = vim.fn.readfile(edit_path)
-check(text(20):find("replaced 1 occurrence (now lines 3-3)", 1, true) ~= nil and not is_err(20), "edit_file exact multi-line: " .. text(20))
+check(text(20):find("replaced 1 occurrence (now lines 3-3, shown in the editor)", 1, true) ~= nil and not is_err(20), "edit_file exact multi-line: " .. text(20))
 check(text(21):find("now lines 1-1", 1, true) ~= nil and not is_err(21), "edit_file partial-line match: " .. text(21))
 check(disk[1] == "local function greet(who)" and disk[3] == "\t\treturn \"hi\"", "exact edits landed: " .. disk[1] .. " | " .. disk[3])
 check(text(22):find("ignoring indentation", 1, true) ~= nil and not is_err(22), "edit_file indentation fallback reported: " .. text(22))
@@ -148,6 +148,15 @@ check(is_err(25) and text(25):find("not found", 1, true), "edit_file missing old
 check(is_err(26) and text(26):find("no such file", 1, true), "edit_file missing file errors: " .. text(26))
 check(is_err(34) and text(34):find("not found", 1, true), "edit_file whitespace-only old_str is not found: " .. text(34))
 check(not is_err(35) and disk[13] == "\t\tdeep = false" and disk[14] == "\t\t\tmore = 1", "indentation fallback with a leading blank line keeps the base indent: " .. vim.inspect({ disk[13], disk[14] }))
+check(text(35):find("now lines 12-14, shown in the editor", 1, true) ~= nil, "edit_file reports the shown range: " .. text(35))
+local ewin
+for _, w in ipairs(vim.api.nvim_list_wins()) do
+  if vim.api.nvim_win_get_buf(w) == ebuf then ewin = w end
+end
+check(ewin ~= nil and vim.api.nvim_win_get_cursor(ewin)[1] == 12, "edit_file showed the edited buffer with the cursor on the change")
+local emarks = vim.api.nvim_buf_get_extmarks(ebuf, ns, 0, -1, { details = true })
+check(#emarks == 1 and emarks[1][2] == 11 and emarks[1][4].end_row == 14, "edit_file highlighted the edited lines")
+check(fwin ~= ewin, "open_file split instead of replacing the modified edit buffer")
 check(text(27):find("^Saved .*%(14 lines%)") ~= nil and not is_err(27), "save_file wrote the buffer: " .. text(27))
 check(text(28):find("Wrote", 1, true) ~= nil and vim.deep_equal(vim.fn.readfile(tmp .. "/new.txt"), { "a", "b" }), "write_file created new.txt: " .. text(28))
 check(is_err(29) and text(29):find("declined", 1, true) and vim.uv.fs_stat(tmp .. "/decline-me.txt") == nil, "write_file declined leaves no file: " .. text(29))

@@ -133,6 +133,61 @@ local function resolve_path(path)
 	return abs
 end
 
+---Load (or find) the buffer for an existing file without showing it.
+---@param path string
+---@return integer buf
+local function load_buf(path)
+	local buf = vim.fn.bufadd(path)
+	vim.fn.bufload(buf)
+	vim.bo[buf].buflisted = true
+	return buf
+end
+
+---Show `buf` in the target window (splitting first when that window holds
+---another modified buffer), centre the cursor on `first` and highlight
+---`first`-`last` until the cursor leaves the range.
+---@param buf integer
+---@param first integer 1-based
+---@param last integer 1-based
+---@return integer first, integer last clamped to the buffer
+local function show_range(buf, first, last)
+	local win = target_win()
+	vim.api.nvim_set_current_win(win)
+	if vim.api.nvim_win_get_buf(win) ~= buf then
+		if vim.bo[vim.api.nvim_win_get_buf(win)].modified then
+			vim.cmd("split")
+			win = vim.api.nvim_get_current_win()
+		end
+		vim.api.nvim_win_set_buf(win, buf)
+	end
+	local total = vim.api.nvim_buf_line_count(buf)
+	first = math.max(1, math.min(first, total))
+	last = math.max(first, math.min(last, total))
+	vim.api.nvim_win_set_cursor(win, { first, 0 })
+	vim.cmd("normal! zz")
+
+	vim.api.nvim_buf_clear_namespace(buf, open_ns, 0, -1)
+	vim.api.nvim_buf_set_extmark(buf, open_ns, first - 1, 0, {
+		end_row = last,
+		hl_group = "Visual",
+		hl_eol = true,
+		priority = 50,
+	})
+	local group = vim.api.nvim_create_augroup("harner_open_file_" .. buf, { clear = true })
+	vim.api.nvim_create_autocmd("CursorMoved", {
+		group = group,
+		buffer = buf,
+		callback = function()
+			local l = vim.api.nvim_win_get_cursor(0)[1]
+			if l < first or l > last then
+				vim.api.nvim_buf_clear_namespace(buf, open_ns, 0, -1)
+				return true -- delete this autocmd
+			end
+		end,
+	})
+	return first, last
+end
+
 M.tools.open_file = {
 	description = "Open a file in the editor and move the cursor to a line, optionally highlighting a line range. "
 		.. "Use it to take the user to the code you are talking about instead of quoting it. "
@@ -147,43 +202,8 @@ M.tools.open_file = {
 		if not path then
 			error(err, 0)
 		end
-		local win = target_win()
-		vim.api.nvim_set_current_win(win)
-		local cur = vim.api.nvim_win_get_buf(win)
-		local already = vim.api.nvim_buf_get_name(cur) == path
-		if not already then
-			if vim.bo[cur].modified then
-				vim.cmd("split")
-				win = vim.api.nvim_get_current_win()
-			end
-			vim.cmd("edit " .. vim.fn.fnameescape(path))
-		end
-		local buf = vim.api.nvim_win_get_buf(win)
-		local total = vim.api.nvim_buf_line_count(buf)
-		local first = math.max(1, math.min(tonumber(args.line) or 1, total))
-		local last = math.max(first, math.min(tonumber(args.end_line) or first, total))
-		vim.api.nvim_win_set_cursor(win, { first, 0 })
-		vim.cmd("normal! zz")
-
-		vim.api.nvim_buf_clear_namespace(buf, open_ns, 0, -1)
-		vim.api.nvim_buf_set_extmark(buf, open_ns, first - 1, 0, {
-			end_row = last,
-			hl_group = "Visual",
-			hl_eol = true,
-			priority = 50,
-		})
-		local group = vim.api.nvim_create_augroup("harner_open_file_" .. buf, { clear = true })
-		vim.api.nvim_create_autocmd("CursorMoved", {
-			group = group,
-			buffer = buf,
-			callback = function()
-				local l = vim.api.nvim_win_get_cursor(0)[1]
-				if l < first or l > last then
-					vim.api.nvim_buf_clear_namespace(buf, open_ns, 0, -1)
-					return true -- delete this autocmd
-				end
-			end,
-		})
+		local line = tonumber(args.line) or 1
+		local first, last = show_range(load_buf(path), line, tonumber(args.end_line) or line)
 		local rel = vim.fn.fnamemodify(path, ":.")
 		return first == last and string.format("Opened %s at line %d.", rel, first)
 			or string.format("Opened %s, highlighted lines %d-%d.", rel, first, last)
@@ -446,16 +466,6 @@ local function content_lines(s)
 	return lines
 end
 
----Load (or find) the buffer for an existing file without showing it.
----@param path string
----@return integer buf
-local function load_buf(path)
-	local buf = vim.fn.bufadd(path)
-	vim.fn.bufload(buf)
-	vim.bo[buf].buflisted = true
-	return buf
-end
-
 local function rel(path)
 	return vim.fn.fnamemodify(path, ":.")
 end
@@ -675,15 +685,15 @@ M.tools.edit_file = {
 			if n > 1 and new_lines[n] == "" then
 				n = n - 1 -- new_str ended with a newline
 			end
-			local last_row = first_row + n - 1
+			local first, last = show_range(buf, first_row + 1, first_row + n)
 			return string.format(
-				"Edited %s: replaced %d occurrence%s (now lines %d-%d). The buffer is modified but not saved; "
-					.. "the user can review it, or call save_file to write it.",
+				"Edited %s: replaced %d occurrence%s (now lines %d-%d, shown in the editor). The buffer is "
+					.. "modified but not saved; the user can review it, or call save_file to write it.",
 				name,
 				#hits,
 				#hits == 1 and "" or "s",
-				first_row + 1,
-				last_row + 1
+				first,
+				last
 			)
 		end
 
@@ -727,15 +737,17 @@ M.tools.edit_file = {
 					vim.api.nvim_buf_set_lines(buf, s - 1, s - 1 + #old_lines, false, repl)
 					first = s
 				end
+				local last
+				first, last = show_range(buf, first, first + #new_lines - 1)
 				return string.format(
-					"Edited %s: replaced %d occurrence%s (now lines %d-%d; old_str matched only after ignoring %s, "
-						.. "re-read the file before further edits). The buffer is modified but not saved; the user can "
-						.. "review it, or call save_file to write it.",
+					"Edited %s: replaced %d occurrence%s (now lines %d-%d, shown in the editor; old_str matched only "
+						.. "after ignoring %s, re-read the file before further edits). The buffer is modified but not "
+						.. "saved; the user can review it, or call save_file to write it.",
 					name,
 					#starts,
 					#starts == 1 and "" or "s",
 					first,
-					first + #new_lines - 1,
+					last,
 					label
 				)
 			end
