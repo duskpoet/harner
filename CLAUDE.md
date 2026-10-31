@@ -90,10 +90,15 @@ All modules live in `lua/harner/`:
   When `tools.call` answers `{ pending = id }` the bridge polls
   `tools.poll(id)` every 100 ms (`vim.uv.sleep`) until a result table comes
   back, giving up after 10 min (`cancel_pending` + `isError`).
-- `confirm.lua` — the confirm float for `run_command`, `write_file`,
-  `save_file` and `edit_file`'s save/drop question (not `vim.ui.select`: Telescope truncated the prompt title so
-  the command being approved was invisible). The full request is wrapped body
-  text, keys in the footer: `y`/`<CR>` approve, `a` approve and stop asking
+- `confirm.lua` — the confirm float for `run_command`, `bash`, `write_file`,
+  `save_file` and `edit_file`'s save/drop question (not `vim.ui.select`:
+  Telescope truncated the prompt title so the command being approved was
+  invisible). The full request is wrapped body text, keys in the footer as
+  highlighted chunks. The float has its own groups, `default = true` links
+  re-set on ColorScheme so it stands out even where `NormalFloat` matches
+  `Normal`: `HarnerConfirmBorder`, `Title` and `Key` → `DiagnosticInfo`,
+  `Footer` → `Comment`, `Normal` → `NormalFloat` (applied via
+  `winhighlight`). `y`/`<CR>` approve, `a` approve and stop asking
   (exactly that command, or every write) for the current chat, `n`/`q`/
   `<Esc>`/`<C-c>` or leaving the float decline; `choices` adds other keys
   (`edit_file` uses `s` save / `d` drop). Grants live on the chat

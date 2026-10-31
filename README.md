@@ -98,6 +98,14 @@ Claude wants to edit a file you have unsaved changes in, it asks first: `s`
 saves your changes and then edits, `d` drops them (reloads from disk), `n`
 skips the edit.
 
+The confirm float has its own highlight groups so it stands out from the
+code behind it: `HarnerConfirmBorder`, `HarnerConfirmTitle` and
+`HarnerConfirmKey` (the keys in the footer) link to `DiagnosticInfo` by
+default, `HarnerConfirmFooter` to `Comment` and `HarnerConfirmNormal` (the
+body) to `NormalFloat`. Override any of them with `nvim_set_hl`, e.g. give
+`HarnerConfirmNormal` a distinct background if your `NormalFloat` matches
+`Normal`.
+
 Headless Claude silently denies anything not pre-approved. harner restricts
 the built-in tools to `Read`, `Grep`, `Glob` and `WebFetch` and approves the
 `nvim` MCP server, so there is no built-in shell and no direct file write;

@@ -1,13 +1,35 @@
 -- Confirm float for actions Claude asks to take (run_command, bash,
--- write_file, save_file). Unlike vim.ui.select, whose frontends put the prompt in a
--- one-line title that gets truncated, the full request is shown as wrapped
--- body text so the user sees exactly what they approve.
+-- write_file, save_file, and edit_file's save/drop question). Unlike
+-- vim.ui.select, whose frontends put the prompt in a one-line title that gets
+-- truncated, the full request is shown as wrapped body text so the user sees
+-- exactly what they approve.
 --
 -- Keys: y / <CR> approve, a approve and stop asking for this kind of action
 -- in the current chat, extra `choices` answer their own value, n / q / <Esc> /
 -- <C-c> decline. Leaving the float declines too.
 
 local M = {}
+
+-- Own highlight groups so the float stands out even where NormalFloat and
+-- FloatBorder match Normal. `default = true` lets colorschemes and users
+-- override them; ColorScheme re-links them after `:hi clear`.
+local function set_highlights()
+	local links = {
+		HarnerConfirmNormal = "NormalFloat",
+		HarnerConfirmBorder = "DiagnosticInfo",
+		HarnerConfirmTitle = "DiagnosticInfo",
+		HarnerConfirmKey = "DiagnosticInfo",
+		HarnerConfirmFooter = "Comment",
+	}
+	for group, link in pairs(links) do
+		vim.api.nvim_set_hl(0, group, { link = link, default = true })
+	end
+end
+set_highlights()
+vim.api.nvim_create_autocmd("ColorScheme", {
+	group = vim.api.nvim_create_augroup("harner_confirm_hl", { clear = true }),
+	callback = set_highlights,
+})
 
 ---@class HarnerConfirmOpts
 ---@field title string short question, shown on the border
@@ -42,12 +64,23 @@ function M.ask(opts, cb)
 		choices[#choices + 1] = { key = "a", label = opts.always, value = "always" }
 	end
 	vim.list_extend(choices, opts.choices or {})
-	local footer = {}
-	for _, c in ipairs(choices) do
-		footer[#footer + 1] = c.key .. " " .. c.label
+	-- Footer as highlighted chunks: keys stand out from their labels.
+	local footer = { { " ", "HarnerConfirmFooter" } }
+	local function add_key(key, label)
+		if #footer > 1 then
+			footer[#footer + 1] = { " · ", "HarnerConfirmFooter" }
+		end
+		footer[#footer + 1] = { key, "HarnerConfirmKey" }
+		footer[#footer + 1] = { " " .. label, "HarnerConfirmFooter" }
 	end
-	footer[#footer + 1] = "n skip"
-	local footer_text = " " .. table.concat(footer, " · ") .. " "
+	for _, c in ipairs(choices) do
+		add_key(c.key, c.label)
+	end
+	add_key("n", "skip")
+	footer[#footer + 1] = { " ", "HarnerConfirmFooter" }
+	local footer_text = table.concat(vim.tbl_map(function(c)
+		return c[1]
+	end, footer))
 
 	local longest = vim.fn.strdisplaywidth(opts.title) + 4
 	for _, l in ipairs(opts.body) do
@@ -63,12 +96,13 @@ function M.ask(opts, cb)
 		height = 1,
 		style = "minimal",
 		border = "rounded",
-		title = " " .. opts.title .. " ",
+		title = { { " " .. opts.title .. " ", "HarnerConfirmTitle" } },
 		title_pos = "center",
-		footer = footer_text,
+		footer = footer,
 		footer_pos = "center",
 		zindex = 60,
 	})
+	vim.wo[win].winhighlight = "NormalFloat:HarnerConfirmNormal,FloatBorder:HarnerConfirmBorder"
 	vim.wo[win].wrap = true
 	vim.wo[win].linebreak = true
 	vim.wo[win].breakindent = true
