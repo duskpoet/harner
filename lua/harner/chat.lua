@@ -96,12 +96,27 @@ function M.target_win()
 	return vim.api.nvim_get_current_win()
 end
 
+-- Many colorschemes (nord among them) leave WinBar alone, so it falls back to
+-- nvim's near-black default. The chat bar uses its own groups linked to the
+-- colorscheme's StatusLine; `default = true` lets users override them and
+-- ColorScheme re-links them after `:hi clear`.
+local function define_hl()
+	vim.api.nvim_set_hl(0, "HarnerWinBar", { link = "StatusLine", default = true })
+	vim.api.nvim_set_hl(0, "HarnerWinBarNC", { link = "StatusLineNC", default = true })
+end
+define_hl()
+vim.api.nvim_create_autocmd("ColorScheme", {
+	group = vim.api.nvim_create_augroup("harner_chat_hl", { clear = true }),
+	callback = define_hl,
+})
+
 local function set_winbar(chat, state)
 	chat.state = state
 	local win = chat_win(chat)
 	if win then
 		local badge = chat.auto and " %#DiagnosticWarn#AUTO%*" or ""
-		vim.wo[win].winbar = string.format("%%#Title# harner %%* %s · %s%s", chat.session_id:sub(1, 8), state, badge)
+		vim.wo[win].winhighlight = "WinBar:HarnerWinBar,WinBarNC:HarnerWinBarNC"
+		vim.wo[win].winbar = string.format("%%#Title# harner %%* %s%s", state, badge)
 	end
 end
 
