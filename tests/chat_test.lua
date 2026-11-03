@@ -16,8 +16,13 @@ local function ask(text)
 end
 ask("Call show_text to display a 3-line Lua hello-world (filetype lua, title Hello). Then reply with exactly one word: done.")
 ask("What is the name of the file I have open and what is on the line my cursor is on? One sentence.")
--- async tools through the real bridge: vim.ui.select is stubbed (headless has no UI)
-vim.ui.select = function(items, opts, cb) io.stderr:write("ui.select: " .. opts.prompt .. " " .. vim.inspect(items) .. "\n"); vim.defer_fn(function() cb("green") end, 200) end
+-- async tools through the real bridge: the ask_user float is stubbed (headless has no UI)
+local confirm = require("harner.confirm")
+confirm.ask = function(opts, cb)
+  io.stderr:write("ask_user: " .. table.concat(opts.body, " ") .. " " .. vim.inspect(opts.items) .. "\n")
+  local i = opts.items and vim.fn.index(opts.items, "green") + 1 or 0
+  vim.defer_fn(function() cb(i > 0 and "item" or "no", i) end, 200)
+end
 ask("Call ask_user with the question 'Which colour?' and the choices red and green. Then call open_file on mcp.lua at the line where M.server_address is defined. Finally reply with only the colour the user picked.")
 
 io.stderr:write("=== CHAT BUFFER ===\n" .. table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n") .. "\n")

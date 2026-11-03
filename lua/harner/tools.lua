@@ -384,6 +384,8 @@ M.tools.get_diagnostics = {
 	end,
 }
 
+local ask -- opens a confirm float filed under the running call, defined below
+
 M.tools.ask_user = {
 	description = "Ask the user a question and wait for the answer. With `choices` the user picks one entry "
 		.. "(the answer is the chosen text); without, they type a free-form reply. Use it when you need a "
@@ -404,11 +406,13 @@ M.tools.ask_user = {
 		end
 		local choices = args.choices
 		if type(choices) == "table" and #choices > 0 then
-			vim.ui.select(choices, { prompt = question }, function(choice)
-				if choice == nil then
-					resolve("The user dismissed the question without answering.", true)
+			-- our float, not vim.ui.select: pickers (Telescope) cut the
+			-- question down to a one-line title
+			ask({ title = "Claude asks", body = vim.split(question, "\n"), items = choices }, function(choice, i)
+				if choice == "item" and choices[i] ~= nil then
+					resolve(tostring(choices[i]))
 				else
-					resolve(choice)
+					resolve("The user dismissed the question without answering.", true)
 				end
 			end)
 		else
@@ -439,13 +443,13 @@ local classifying = {}
 ---@param cb fun(choice:string)
 ---@param id integer|nil the call's id when asking later than its handler ran
 ---       (after the auto-mode classifier answered)
-local function ask(opts, cb, id)
+ask = function(opts, cb, id)
 	id = id or calling
-	local close = require("harner.confirm").ask(opts, function(choice)
+	local close = require("harner.confirm").ask(opts, function(choice, index)
 		if id then
 			asking[id] = nil
 		end
-		cb(choice)
+		cb(choice, index)
 	end)
 	if id and close then
 		asking[id] = close

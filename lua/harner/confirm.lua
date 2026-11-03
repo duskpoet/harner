@@ -40,18 +40,30 @@ vim.api.nvim_create_autocmd("ColorScheme", {
 ---@field choices {key:string, label:string, value:string}[]|nil extra keys,
 ---       each answering its `value` (used instead of or next to yes/always)
 ---@field note string|nil shown dimmed under the body (auto mode's reason for asking)
+---@field items string[]|nil answers to pick from (ask_user): listed numbered under
+---       the body, `1`-`9` or <CR> on an item's line answer "item" with its index
 
----Ask the user; `cb` gets "yes", "always", a choice's value or "no" exactly once.
+---Ask the user; `cb` gets "yes", "always", a choice's value, "item" (plus the
+---item's index) or "no" exactly once.
 ---Returns the float's close function: calling it with "no" declines it.
 ---@param opts HarnerConfirmOpts
----@param cb fun(choice:string)
+---@param cb fun(choice:string, index:integer|nil)
 ---@return fun(choice:string) close
 function M.ask(opts, cb)
 	local prev = vim.api.nvim_get_current_win()
 	vim.cmd("stopinsert")
 	local buf = vim.api.nvim_create_buf(false, true)
 	vim.bo[buf].bufhidden = "wipe"
-	vim.api.nvim_buf_set_lines(buf, 0, -1, false, opts.body)
+	local lines = vim.list_extend({}, opts.body)
+	local first_item -- 1-based buffer line of items[1]
+	if opts.items then
+		lines[#lines + 1] = ""
+		first_item = #lines + 1
+		for i, item in ipairs(opts.items) do
+			lines[#lines + 1] = string.format("%d. %s", i, (item:gsub("\n", " ")))
+		end
+	end
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
 	vim.bo[buf].modifiable = false
 	if opts.filetype then
 		vim.bo[buf].filetype = opts.filetype
@@ -77,6 +89,11 @@ function M.ask(opts, cb)
 	for _, c in ipairs(choices) do
 		add_key(c.key, c.label)
 	end
+	if opts.items then
+		local n = math.min(#opts.items, 9)
+		add_key(n == 1 and "1" or ("1-" .. n), "pick")
+		add_key("<CR>", "pick line")
+	end
 	add_key("n", "skip")
 	footer[#footer + 1] = { " ", "HarnerConfirmFooter" }
 	local footer_text = table.concat(vim.tbl_map(function(c)
@@ -84,14 +101,14 @@ function M.ask(opts, cb)
 	end, footer))
 
 	local longest = vim.fn.strdisplaywidth(opts.title) + 4
-	for _, l in ipairs(opts.body) do
+	for _, l in ipairs(lines) do
 		longest = math.max(longest, vim.fn.strdisplaywidth(l) + 2)
 	end
 	longest = math.max(longest, vim.fn.strdisplaywidth(footer_text) + 4)
 	if opts.note then
 		longest = math.max(longest, vim.fn.strdisplaywidth(opts.note) + 2)
 		local ns = vim.api.nvim_create_namespace("harner_confirm")
-		vim.api.nvim_buf_set_extmark(buf, ns, math.max(#opts.body - 1, 0), 0, {
+		vim.api.nvim_buf_set_extmark(buf, ns, math.max(#lines - 1, 0), 0, {
 			virt_lines = { { { opts.note, "HarnerConfirmFooter" } } },
 		})
 	end
@@ -116,9 +133,13 @@ function M.ask(opts, cb)
 	vim.wo[win].breakindent = true
 	local height = vim.api.nvim_win_text_height(win, {}).all
 	vim.api.nvim_win_set_height(win, math.max(1, math.min(height, vim.o.lines - 8)))
+	if first_item then
+		vim.wo[win].cursorline = true
+		vim.api.nvim_win_set_cursor(win, { first_item, 0 })
+	end
 
 	local done = false
-	local function close(choice)
+	local function close(choice, index)
 		if done then
 			return
 		end
@@ -129,7 +150,7 @@ function M.ask(opts, cb)
 		if vim.api.nvim_win_is_valid(prev) and vim.api.nvim_get_current_win() ~= prev then
 			pcall(vim.api.nvim_set_current_win, prev)
 		end
-		cb(choice)
+		cb(choice, index)
 	end
 
 	local function map(lhs, choice)
@@ -142,6 +163,21 @@ function M.ask(opts, cb)
 	end
 	if opts.yes then
 		map("<CR>", "yes")
+	end
+	if opts.items then
+		for i = 1, math.min(#opts.items, 9) do
+			vim.keymap.set("n", tostring(i), function()
+				close("item", i)
+			end, { buffer = buf, nowait = true })
+		end
+		if not opts.yes then
+			vim.keymap.set("n", "<CR>", function()
+				local i = vim.api.nvim_win_get_cursor(0)[1] - first_item + 1
+				if opts.items[i] then
+					close("item", i)
+				end
+			end, { buffer = buf, nowait = true })
+		end
 	end
 	for _, lhs in ipairs({ "n", "q", "<Esc>", "<C-c>" }) do
 		map(lhs, "no")

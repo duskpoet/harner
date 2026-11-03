@@ -92,7 +92,7 @@ All modules live in `lua/harner/`:
   `tools.poll(id)` every 100 ms (`vim.uv.sleep`) until a result table comes
   back, giving up after 10 min (`cancel_pending` + `isError`).
 - `confirm.lua` — the confirm float for `run_command`, `bash`, `write_file`,
-  `save_file` and `edit_file`'s save/drop question (not `vim.ui.select`:
+  `save_file`, `edit_file`'s save/drop question and `ask_user` with choices (not `vim.ui.select`:
   Telescope truncated the prompt title so the command being approved was
   invisible). The full request is wrapped body text, keys in the footer as
   highlighted chunks. The float has its own groups, `default = true` links
@@ -258,8 +258,11 @@ through the nvim tools: `edit_file` lands in the buffer unsaved, disk writes
   Drive popup tests through normal-mode keys and `nvim_buf_set_lines`.
 - `vim.o.exrc` is on in the user's config, so a `.nvim.lua` in this directory
   would be sourced when nvim starts here. Do not add one.
-- The user's `vim.ui.select` is telescope-ui-select (ask_user choices open a
-  Telescope picker; confirms use `confirm.lua` instead); `vim.ui.input` is the default
+- The user's `vim.ui.select` is telescope-ui-select, which truncates the
+  prompt to a one-line title, so confirms and ask_user choices use
+  `confirm.lua` instead (`items`: numbered list under the question, `1`-`9`
+  or `<CR>` on a line picks, `cb("item", index)` so a choice named "no" is
+  not a decline); `vim.ui.input` is the default
   `input()` cmdline prompt, which blocks the calling `nvim_exec_lua` until
   the user answers (functionally fine, the bridge just waits).
 - To exercise flows with the main loop running (plugins, Telescope, NERDTree),

@@ -22,6 +22,10 @@ local real_confirm_ask = confirm.ask
 confirm.ask = function(opts, cb)
   local p = opts.title .. " " .. table.concat(opts.body, " ")
   ui_prompts[#ui_prompts + 1] = p
+  if opts.items then -- ask_user with choices picks the first
+    vim.defer_fn(function() cb("item", 1) end, 150)
+    return
+  end
   vim.defer_fn(function() cb(p:find("decline", 1, true) and "no" or "yes") end, 150)
 end
 -- snapshot where open_file / edit_file left the cursor, as each call runs

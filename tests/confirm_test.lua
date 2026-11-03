@@ -44,6 +44,22 @@ confirm.ask({ title = "x", body = { "y" }, yes = "ok" }, function(c) got = c end
 keys("<CR>")
 check(got == "yes", "<CR> approves")
 
+-- ask_user with choices: the whole question in the float, numbered answers
+local q = "Should the cache key include the resolved path or the path as the user typed it? The resolved one survives symlinks but costs a stat per lookup."
+local r = tools.call("ask_user", { question = q, choices = { "resolved", "as typed", "no" } })
+fw = floats()[1]
+local flines = fw and vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(fw), 0, -1, false) or {}
+check(flines[1] == q and flines[3] == "1. resolved" and flines[5] == "3. no", "ask_user float shows the full question and numbered choices")
+keys("2")
+check(text(tools.poll(r.pending)) == "as typed" and #floats() == 0, "digit picks the choice")
+r = tools.call("ask_user", { question = q, choices = { "resolved", "as typed", "no" } })
+keys("jj<CR>")
+check(text(tools.poll(r.pending)) == "no", "<CR> picks the choice under the cursor (even one named 'no')")
+r = tools.call("ask_user", { question = q, choices = { "a", "b" } })
+keys("q")
+local res_q = tools.poll(r.pending)
+check(res_q.isError and text(res_q):find("dismissed", 1, true), "q dismisses the question")
+
 -- 2. run_command: `a` grants exactly that command for the chat
 local r = call("run_command", { cmd = "echo 'granted'" }, "a")
 check(text(r) == "granted" and not r.isError, "run_command approved with a: " .. tostring(text(r)))
