@@ -83,8 +83,16 @@ All modules live in `lua/harner/`:
   A missing `claude_cmd` is reported through `on_error`/`on_done` (scheduled,
   so the caller has stored the run first) without spawning anything.
 - `mcp.lua` — writes the temp MCP config (server name `nvim`, command
-  `vim.v.progpath -l bridge.lua`, env `HARNER_NVIM=vim.v.servername`) and the
-  `--append-system-prompt` note describing the tools.
+  `vim.v.progpath -l bridge.lua`, env `HARNER_NVIM=vim.v.servername`, plus
+  `config.mcp_servers`; a user server named `nvim` is an error the runner
+  reports like a missing binary; file is `0600`, removed at run end) and the
+  `--append-system-prompt` note describing the tools (`servers_note()` names
+  the extra servers). The runner adds `mcp__<name>` to `--allowedTools` for
+  each. OAuth servers work under `-p` once logged in via interactive
+  `/mcp`: the token store (`~/.claude/.credentials.json` `mcpOAuth`) is keyed
+  by server name + URL hash, so the name must match the login (verified with
+  claude 2.1.316; a different name gets no tools). Tool notes show any
+  server's tools as `server:tool`.
 - `bridge.lua` — standalone MCP server run with `nvim -l`. Blocking
   `io.lines()` loop over stdin, synchronous rpcrequest into the parent for
   `tools/list` and `tools/call`. Has no access to the plugin's Lua state.

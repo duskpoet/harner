@@ -18,6 +18,11 @@ M.config = {
 	-- pre-approved tools; `mcp__nvim` allows every tool from the nvim MCP server
 	allowed_tools = { "mcp__nvim" },
 	extra_args = {}, ---@type string[]
+	-- extra MCP servers merged next to `nvim` (Claude's mcpServers format), e.g.
+	-- linear = { type = "http", url = "https://mcp.linear.app/mcp" }. Each one's
+	-- tools are pre-approved (mcp__<name>). OAuth servers work after a `/mcp`
+	-- login in interactive claude under the same name and URL; `nvim` is reserved.
+	mcp_servers = {}, ---@type table<string, table>
 	show_text = {
 		mode = "split", ---@type "split"|"vsplit"|"float"
 		float_width = 100,

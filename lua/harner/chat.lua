@@ -174,7 +174,7 @@ local function append_lines(chat, lines)
 end
 
 local function short_name(name)
-	return (name:gsub("^mcp__nvim__", "nvim:"))
+	return (name:gsub("^mcp__(.-)__", "%1:"))
 end
 
 ---The italic note written into the transcript when Claude calls a tool.

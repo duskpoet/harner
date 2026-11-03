@@ -15,23 +15,38 @@ function M.server_address()
 	return addr
 end
 
----Write the MCP config JSON and return its path.
+---Names of the user's extra MCP servers (`config.mcp_servers`), sorted.
+---@return string[]
+function M.extra_servers()
+	local names = vim.tbl_keys(require("harner").config.mcp_servers or {})
+	table.sort(names)
+	return names
+end
+
+---Write the MCP config JSON (nvim plus `config.mcp_servers`) and return its
+---path. The file may hold API keys, so it is created 0600; the runner deletes
+---it when the run ends. Errors when a user server is named `nvim`.
 ---@return string path
 function M.write_config()
-	local cfg = {
-		mcpServers = {
-			nvim = {
-				type = "stdio",
-				command = vim.v.progpath,
-				args = { "-l", bridge_path },
-				env = { HARNER_NVIM = M.server_address() },
-			},
+	local servers = {
+		nvim = {
+			type = "stdio",
+			command = vim.v.progpath,
+			args = { "-l", bridge_path },
+			env = { HARNER_NVIM = M.server_address() },
 		},
 	}
+	local extra = require("harner").config.mcp_servers or {}
+	for _, name in ipairs(M.extra_servers()) do
+		if name == "nvim" then
+			error("mcp_servers: the name `nvim` is reserved for harner's own server; rename it", 0)
+		end
+		servers[name] = extra[name]
+	end
 	local path = vim.fn.tempname() .. "-harner-mcp.json"
-	local f = assert(io.open(path, "w"))
-	f:write(vim.json.encode(cfg))
-	f:close()
+	local fd = assert(vim.uv.fs_open(path, "w", tonumber("600", 8)))
+	assert(vim.uv.fs_write(fd, vim.json.encode({ mcpServers = servers })))
+	vim.uv.fs_close(fd)
 	return path
 end
 
@@ -48,6 +63,20 @@ function M.shell_note()
 		.. "that needs shell commands (git, gh, builds, tests), say so up front and list which steps you cannot do, "
 		.. "rather than stopping partway through; the user can enable it with `bash = { enabled = true }` in "
 		.. "require('harner').setup()."
+end
+
+---What the system note says about the user's extra MCP servers ("" for none).
+---@return string
+function M.servers_note()
+	local names = M.extra_servers()
+	if #names == 0 then
+		return ""
+	end
+	local list = {}
+	for _, name in ipairs(names) do
+		list[#list + 1] = ("%s (tools mcp__%s__*)"):format(name, name)
+	end
+	return "The user also connected these MCP servers, whose tools are pre-approved: " .. table.concat(list, ", ") .. "."
 end
 
 ---@param cwd string
@@ -69,6 +98,7 @@ function M.system_note(cwd)
 		"After editing several files, save them with one save_file call listing them all in `paths` (the user confirms once), not one call per file.",
 		"write_file (confirmed by the user) is for new files or complete rewrites only.",
 		M.shell_note(),
+		M.servers_note(),
 		"When only discussing a change, show it with show_text (filetype diff or the language) instead of editing.",
 		"Working directory: " .. cwd,
 	}, " ")

@@ -148,6 +148,7 @@ require("harner").setup({
   builtin_tools = { "Read", "Grep", "Glob", "WebFetch" },
   allowed_tools = { "mcp__nvim" },
   extra_args = {},        -- appended to the claude argv
+  mcp_servers = {},       -- extra MCP servers, see below
   show_text = {
     mode = "split",       -- "split" | "vsplit" | "float"
     float_width = 100,
@@ -191,6 +192,35 @@ require("harner").setup({
   },
 })
 ```
+
+### Extra MCP servers
+
+Chats run with `--strict-mcp-config`, so servers you added with `claude mcp add`
+are not loaded. List the ones a chat should have in `mcp_servers` (Claude's
+`mcpServers` format). They are merged next to harner's own `nvim` server (that
+name is reserved), every tool they offer is pre-approved (`mcp__<name>`), and
+the system note tells Claude they exist.
+
+```lua
+require("harner").setup({
+  mcp_servers = {
+    -- OAuth: log in once from interactive `claude` (/mcp) with a server of the
+    -- same name and URL; `claude -p` reuses the stored token
+    linear = { type = "http", url = "https://mcp.linear.app/mcp" },
+    -- or an API key
+    github = {
+      type = "http",
+      url = "https://api.githubcopilot.com/mcp/",
+      headers = { Authorization = "Bearer " .. (os.getenv("GITHUB_TOKEN") or "") },
+    },
+  },
+})
+```
+
+OAuth tokens are stored per server name and URL, so the name in `mcp_servers`
+must match the one you logged in with (`claude mcp list` shows it). The
+generated config file can contain API keys: it is written `0600` and deleted
+when the run ends.
 
 ## How it works
 

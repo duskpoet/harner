@@ -14,20 +14,33 @@ function M.start(opts)
 	local config = require("harner").config
 	local mcp = require("harner.mcp")
 
-	if vim.fn.executable(config.claude_cmd) ~= 1 then
-		-- report asynchronously so the caller has stored the run before on_done clears it
+	-- report asynchronously so the caller has stored the run before on_done clears it
+	local function fail(msg)
 		vim.schedule(function()
-			opts.on_error(
-				("`%s` not found on PATH; install the Claude CLI or set claude_cmd in require('harner').setup()"):format(
-					config.claude_cmd
-				)
-			)
+			opts.on_error(msg)
 			opts.on_done(nil)
 		end)
 		return { proc = nil, session_id = opts.session_id }
 	end
 
-	local mcp_path = mcp.write_config()
+	if vim.fn.executable(config.claude_cmd) ~= 1 then
+		return fail(
+			("`%s` not found on PATH; install the Claude CLI or set claude_cmd in require('harner').setup()"):format(
+				config.claude_cmd
+			)
+		)
+	end
+
+	local ok, mcp_path = pcall(mcp.write_config)
+	if not ok then
+		return fail(tostring(mcp_path))
+	end
+
+	-- built-in tools, the configured allow-list, and every tool of each extra MCP server
+	local allowed = vim.list_extend(vim.deepcopy(config.builtin_tools), config.allowed_tools)
+	for _, name in ipairs(mcp.extra_servers()) do
+		allowed[#allowed + 1] = "mcp__" .. name
+	end
 
 	local args = {
 		config.claude_cmd,
@@ -42,7 +55,7 @@ function M.start(opts)
 		"--tools",
 		table.concat(config.builtin_tools, ","),
 		"--allowedTools",
-		table.concat(vim.list_extend(vim.deepcopy(config.builtin_tools), config.allowed_tools), ","),
+		table.concat(allowed, ","),
 		"--append-system-prompt",
 		mcp.system_note(opts.cwd),
 	}
