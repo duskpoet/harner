@@ -110,7 +110,7 @@ All modules live in `lua/harner/`:
   on a bridge timeout, all on cancel / run end), so nothing runs or writes
   after a call ended.
 - `auto.lua` — auto mode, a per-chat flag (`chat.auto`, default
-  `config.auto.enabled`, winbar badge `AUTO`, reset by `<leader>hn`). After
+  `config.auto.enabled`, on by default, tests that check confirms pin it off; winbar badge `AUTO`, reset by `<leader>hn`). After
   the existing short-circuits (confirm off, grants, allow-lists) it decides
   before the confirm: `writes_ok(paths)` (inside the real cwd, not `.git/` or `.claude/` (hooks),
   not `.nvim.lua`/`.nvimrc`/`.exrc`/`.lazy.lua`/`.envrc`) for

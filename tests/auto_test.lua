@@ -63,8 +63,10 @@ end
 -- toggle, badge, default
 vim.cmd("cd " .. vim.fn.fnameescape(root))
 local c = chat.ensure()
-check(c.auto == false and not auto.enabled(), "auto off by default")
+check(c.auto == true and auto.enabled(), "auto on by default")
 chat.toggle()
+auto.toggle()
+check(c.auto == false and not auto.enabled(), "toggle turns it off")
 auto.toggle()
 check(c.auto == true and auto.enabled(), "toggle turns it on")
 local win = vim.fn.bufwinid(c.buf)
@@ -178,6 +180,7 @@ check(#prompts == n + 1 and not classified(), "auto off asks without classifying
 
 -- a new chat starts at the default
 auto.toggle()
+harner.config.auto.enabled = false
 chat.new()
 check(chat.chats[chat.current].auto == false, "new chat resets auto")
 harner.config.auto.enabled = true

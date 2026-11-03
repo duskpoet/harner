@@ -5,7 +5,7 @@ local root, check = t.root, t.check
 -- run_command), error paths. Offline.
 -- vim.ui.select / vim.ui.input are stubbed and answer after a short delay so
 -- the async path really goes through the bridge's poll loop.
-require("harner").setup({ show_text = { mode = "split" } })
+require("harner").setup({ show_text = { mode = "split" }, auto = { enabled = false } })
 local mcp = require("harner.mcp")
 local addr = mcp.server_address()
 local bridge = root .. "/lua/harner/bridge.lua"

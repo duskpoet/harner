@@ -101,8 +101,8 @@ skips the edit.
 
 ### Auto mode
 
-`<leader>ha` turns on auto mode for the current chat (the winbar shows
-`AUTO`; a new chat starts at `auto.enabled`). Your allow-lists and `a` grants
+Auto mode is on by default (the winbar shows `AUTO`); `<leader>ha` toggles it
+for the current chat, and a new chat starts at `auto.enabled`. Your allow-lists and `a` grants
 still apply first. Beyond them:
 
 - writes (`write_file`, `save_file`) inside the working directory run without
@@ -169,7 +169,7 @@ require("harner").setup({
     max_output = 30000,   -- bytes returned to Claude, middle cut beyond that
   },
   auto = {                -- auto mode, see above
-    enabled = false,      -- default for new chats (<leader>ha toggles per chat)
+    enabled = true,       -- default for new chats (<leader>ha toggles per chat)
     allow = {},           -- extra bash prefixes that run without asking
     model = "haiku",      -- classifier model
     timeout = 15,         -- classifier seconds before falling back to asking

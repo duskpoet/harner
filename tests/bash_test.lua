@@ -5,7 +5,7 @@ local root, check = t.root, t.check
 -- cancel killing the process group, system note. Offline; calls tools.call /
 -- poll directly (the bridge round trip is covered by bridge_test).
 local harner = require("harner")
-harner.setup({})
+harner.setup({ auto = { enabled = false } })
 local tools = require("harner.tools")
 local mcp = require("harner.mcp")
 vim.cmd("cd " .. vim.fn.fnameescape(root))

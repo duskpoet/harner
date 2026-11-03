@@ -57,7 +57,7 @@ M.config = {
 	-- calls go to a classifier (`claude -p --model <model>`) that either lets
 	-- them run or hands them to the normal confirm with its reason.
 	auto = {
-		enabled = false,
+		enabled = true,
 		allow = {}, ---@type string[] extra bash prefixes (whole words, no shell operators)
 		model = "haiku",
 		timeout = 15, -- seconds for the classifier; on timeout the user is asked
