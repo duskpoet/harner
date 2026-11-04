@@ -23,6 +23,54 @@ function M.extra_servers()
 	return names
 end
 
+---Tool prefix of a claude.ai connector: "Grafana Cloud" -> mcp__claude_ai_Grafana_Cloud.
+---@param name string
+---@return string
+function M.connector_prefix(name)
+	return "mcp__claude_ai_" .. name:gsub("[^%w_-]", "_")
+end
+
+---The configured claude.ai connectors (`config.connectors`).
+---@return string[]
+function M.connectors()
+	return require("harner").config.connectors or {}
+end
+
+---Server names from every `.mcp.json` between `cwd` and `/`. claude -p has no
+---trust prompt, so it would start them (and run their commands) unasked; the
+---runner denies them by name. nil means deny by name is not safe (a file that
+---does not parse, or a name shared with `nvim` / `config.mcp_servers`, which a
+---name deny would also block): the runner falls back to --strict-mcp-config.
+---@param cwd string
+---@return string[]|nil
+function M.project_servers(cwd)
+	local own = require("harner").config.mcp_servers or {}
+	local names, seen = {}, {}
+	for _, path in ipairs(vim.fs.find(".mcp.json", { upward = true, path = cwd, type = "file", limit = math.huge })) do
+		local ok, decoded = pcall(function()
+			return vim.json.decode(table.concat(vim.fn.readfile(path), "\n"))
+		end)
+		if not ok or type(decoded) ~= "table" then
+			return nil
+		end
+		local servers = decoded.mcpServers
+		if servers ~= nil and type(servers) ~= "table" then
+			return nil
+		end
+		for name in pairs(servers or {}) do
+			if name == "nvim" or own[name] ~= nil then
+				return nil
+			end
+			if not seen[name] then
+				seen[name] = true
+				names[#names + 1] = name
+			end
+		end
+	end
+	table.sort(names)
+	return names
+end
+
 ---Write the MCP config JSON (nvim plus `config.mcp_servers`) and return its
 ---path. The file may hold API keys, so it is created 0600; the runner deletes
 ---it when the run ends. Errors when a user server is named `nvim`.
@@ -34,6 +82,8 @@ function M.write_config()
 			command = vim.v.progpath,
 			args = { "-l", bridge_path },
 			env = { HARNER_NVIM = M.server_address() },
+			-- exempt from ToolSearch deferral: the editor tools are used every turn
+			alwaysLoad = true,
 		},
 	}
 	local extra = require("harner").config.mcp_servers or {}
@@ -65,18 +115,44 @@ function M.shell_note()
 		.. "require('harner').setup()."
 end
 
----What the system note says about the user's extra MCP servers ("" for none).
+---MCP servers and tools approved beyond nvim, as `{ label, rule }`: `rule` goes
+---into --allowedTools, `label` into the system note. Covers `config.mcp_servers`,
+---`config.connectors` and MCP entries of `config.allowed_tools` (a server or a
+---single tool), so the note and the real permissions cannot drift apart.
+---@return {label:string, rule:string}[]
+function M.approved()
+	local list = {}
+	for _, name in ipairs(M.extra_servers()) do
+		list[#list + 1] = { label = ("%s (tools mcp__%s__*)"):format(name, name), rule = "mcp__" .. name }
+	end
+	for _, name in ipairs(M.connectors()) do
+		local prefix = M.connector_prefix(name)
+		list[#list + 1] = { label = ("%s (tools %s__*)"):format(name, prefix), rule = prefix }
+	end
+	for _, tool in ipairs(require("harner").config.allowed_tools or {}) do
+		if tool:match("^mcp__") and tool ~= "mcp__nvim" and not tool:match("^mcp__nvim__") then
+			list[#list + 1] = { label = tool, rule = tool }
+		end
+	end
+	return list
+end
+
+---What the system note says about MCP servers beyond nvim: the approved ones
+---(`approved()`), and that any other server's tools are denied (claude loads
+---every configured server, harner approves only these).
 ---@return string
 function M.servers_note()
-	local names = M.extra_servers()
-	if #names == 0 then
-		return ""
+	local list = vim.tbl_map(function(entry)
+		return entry.label
+	end, M.approved())
+	local deny = "Tools of any other MCP server you may see are not approved here and every call to them is denied, so do not use them."
+	if #list == 0 then
+		return "Of the MCP servers, only mcp__nvim__ is approved. " .. deny
 	end
-	local list = {}
-	for _, name in ipairs(names) do
-		list[#list + 1] = ("%s (tools mcp__%s__*)"):format(name, name)
-	end
-	return "The user also connected these MCP servers, whose tools are pre-approved: " .. table.concat(list, ", ") .. "."
+	return "The user also connected these MCP servers, whose tools are pre-approved: "
+		.. table.concat(list, ", ")
+		.. ". "
+		.. deny
 end
 
 ---@param cwd string

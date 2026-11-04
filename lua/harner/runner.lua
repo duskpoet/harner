@@ -31,15 +31,24 @@ function M.start(opts)
 		)
 	end
 
+	-- a second --settings would replace harner's (the deny list for project .mcp.json servers)
+	for _, arg in ipairs(config.extra_args or {}) do
+		if arg == "--settings" or arg:match("^%-%-settings=") then
+			return fail("extra_args: --settings is not supported, harner passes its own; put settings in ~/.claude/settings.json")
+		end
+	end
+
 	local ok, mcp_path = pcall(mcp.write_config)
 	if not ok then
 		return fail(tostring(mcp_path))
 	end
 
-	-- built-in tools, the configured allow-list, and every tool of each extra MCP server
+	-- built-in tools, the configured allow-list, and the approved MCP servers
 	local allowed = vim.list_extend(vim.deepcopy(config.builtin_tools), config.allowed_tools)
-	for _, name in ipairs(mcp.extra_servers()) do
-		allowed[#allowed + 1] = "mcp__" .. name
+	for _, entry in ipairs(mcp.approved()) do
+		if not vim.tbl_contains(allowed, entry.rule) then
+			allowed[#allowed + 1] = entry.rule
+		end
 	end
 
 	local args = {
@@ -51,7 +60,6 @@ function M.start(opts)
 		"--include-partial-messages",
 		"--mcp-config",
 		mcp_path,
-		"--strict-mcp-config",
 		"--tools",
 		table.concat(config.builtin_tools, ","),
 		"--allowedTools",
@@ -59,6 +67,16 @@ function M.start(opts)
 		"--append-system-prompt",
 		mcp.system_note(opts.cwd),
 	}
+	-- project .mcp.json servers would start unasked (-p has no trust prompt)
+	local project = mcp.project_servers(opts.cwd)
+	if project == nil then
+		args[#args + 1] = "--strict-mcp-config"
+	elseif #project > 0 then
+		local deny = vim.tbl_map(function(name)
+			return { serverName = name }
+		end, project)
+		vim.list_extend(args, { "--settings", vim.json.encode({ deniedMcpServers = deny }) })
+	end
 	if opts.resume then
 		vim.list_extend(args, { "--resume", opts.session_id })
 	else

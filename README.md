@@ -134,8 +134,8 @@ body) to `NormalFloat`. Override any of them with `nvim_set_hl`, e.g. give
 `Normal`.
 
 Headless Claude silently denies anything not pre-approved. harner restricts
-the built-in tools to `Read`, `Grep`, `Glob` and `WebFetch` and approves the
-`nvim` MCP server, so there is no built-in shell and no direct file write;
+the built-in tools to `Read`, `Grep`, `Glob`, `WebFetch` and `ToolSearch` and
+approves the `nvim` MCP server, so there is no built-in shell and no direct file write;
 all changes go through the tools above (shell commands only through the
 confirmed `bash` tool, when you enable it).
 
@@ -148,10 +148,11 @@ require("harner").setup({
   claude_cmd = "claude",
   model = nil,            -- passed as --model when set
   width = 0.4,            -- chat split: fraction of columns, or columns if >= 1
-  builtin_tools = { "Read", "Grep", "Glob", "WebFetch" },
+  builtin_tools = { "Read", "Grep", "Glob", "WebFetch", "ToolSearch" },
   allowed_tools = { "mcp__nvim" },
-  extra_args = {},        -- appended to the claude argv
+  extra_args = {},        -- appended to the claude argv (no --settings: harner passes its own)
   mcp_servers = {},       -- extra MCP servers, see below
+  connectors = {},        -- claude.ai connectors to approve, see below
   show_text = {
     mode = "split",       -- "split" | "vsplit" | "float"
     float_width = 100,
@@ -199,11 +200,26 @@ require("harner").setup({
 
 ### Extra MCP servers
 
-Chats run with `--strict-mcp-config`, so servers you added with `claude mcp add`
-are not loaded. List the ones a chat should have in `mcp_servers` (Claude's
+Claude loads every MCP server it knows about: claude.ai connectors, servers
+added with `claude mcp add`, plugin servers. harner approves only `nvim` and
+the ones you list; Claude still sees the others (deferred through `ToolSearch`,
+so their schemas don't fill the context), but every call to them is denied and
+the system note tells it not to try. To trim what loads, disconnect servers in
+claude itself. The exception is project `.mcp.json` files (in the working
+directory or any parent): `claude -p` would start them without a trust
+prompt, so harner denies them; if one can't be read, that chat runs with
+`--strict-mcp-config` and loads none of the above. A project's
+`.claude/settings.json` is still read unasked, though: its `permissions.allow`
+can pre-approve any loaded server's tools (your connectors included) and its
+`hooks` run commands. Only chat in repositories you trust.
+
+Servers that only harner should use go in `mcp_servers` (Claude's
 `mcpServers` format). They are merged next to harner's own `nvim` server (that
 name is reserved), every tool they offer is pre-approved (`mcp__<name>`), and
-the system note tells Claude they exist.
+the system note tells Claude they exist. claude.ai connectors go in
+`connectors`, by the name `claude mcp list` shows without the `claude.ai `
+prefix, e.g. `connectors = { "Grafana Cloud", "Linear" }`, which approves
+`mcp__claude_ai_Grafana_Cloud__*` and `mcp__claude_ai_Linear__*`.
 
 ```lua
 require("harner").setup({

@@ -41,7 +41,7 @@ is only the headless `-p` path.
 
 ```
 chat.lua ──send──▶ runner.lua ──vim.system──▶ claude -p --output-format stream-json
-   ▲                                              │ --mcp-config <tmp.json> --strict-mcp-config
+   ▲                                              │ --mcp-config <tmp.json>
    │ text deltas / tool notes                     ▼
    │                                      nvim -l bridge.lua   (MCP stdio server)
    │                                              │ vim.rpcrequest(chan, "nvim_exec_lua", ...)
@@ -87,8 +87,12 @@ All modules live in `lua/harner/`:
   `config.mcp_servers`; a user server named `nvim` is an error the runner
   reports like a missing binary; file is `0600`, removed at run end) and the
   `--append-system-prompt` note describing the tools (`servers_note()` names
-  the extra servers). The runner adds `mcp__<name>` to `--allowedTools` for
-  each. OAuth servers work under `-p` once logged in via interactive
+  the extra servers and `config.connectors`, and says every other server's
+  tools are denied). `approved()` is the single list behind both the note
+  and `--allowedTools`: `{label, rule}` per `mcp_servers` entry
+  (`mcp__<name>`), connector (`connector_prefix(name)`,
+  `mcp__claude_ai_<name, non-word → _>`) and MCP entry of `allowed_tools`.
+  OAuth servers work under `-p` once logged in via interactive
   `/mcp`: the token store (`~/.claude/.credentials.json` `mcpOAuth`) is keyed
   by server name + URL hash, so the name must match the login (verified with
   claude 2.1.316; a different name gets no tools). Tool notes show any
@@ -238,11 +242,39 @@ paragraph.
 ## Permissions model
 
 Headless Claude silently denies anything not pre-approved. We pass
-`--tools Read,Grep,Glob,WebFetch` (restricts the built-in set, so no Edit /
+`--tools Read,Grep,Glob,WebFetch,ToolSearch` (restricts the built-in set, so no Edit /
 Write / Bash exist at all; shell access is only the confirmed, opt-in
-`mcp__nvim__bash`) and `--allowedTools Read,Grep,Glob,WebFetch,mcp__nvim`
+`mcp__nvim__bash`) and `--allowedTools Read,Grep,Glob,WebFetch,ToolSearch,mcp__nvim`
 (`mcp__nvim` approves every tool of the server named `nvim`). The server name in
-`mcp.lua` and the allow-list entry must stay in sync. File changes only happen
+`mcp.lua` and the allow-list entry must stay in sync.
+
+No `--strict-mcp-config` (deliberately): claude loads every server it knows
+(claude.ai connectors, `claude mcp add`, plugins) and harner only decides what
+is approved (`allowed_tools`, `mcp_servers`, `connectors`); the rest is visible
+but denied. `ToolSearch` must stay in `--tools`: without it MCP schemas are not
+deferred and all of them are inlined (measured on 2.1.318 with 42 servers:
+148.6k input tokens and ~$1.19 per cold-cache turn, vs 17.4k / $0.11 with it).
+The `nvim` server entry carries `alwaysLoad = true` so the editor tools stay
+upfront; without it every first editor call costs a ToolSearch round trip.
+Project `.mcp.json` files are the catch: claude reads every one from cwd up
+to `/` (past the git root) and `-p` has no trust prompt, so their stdio
+commands would run on the first message in a cloned repo.
+`enableAllProjectMcpServers: false` / `enabledMcpjsonServers: []` don't stop
+that, and `--setting-sources user,local` does but also drops `CLAUDE.md`. So
+`mcp.project_servers(cwd)` collects their names and the runner passes
+`--settings {"deniedMcpServers":[{"serverName":…}]}`; when a file doesn't
+parse or a name is also `nvim` / in `mcp_servers` (a name deny would block
+ours too) it returns nil and that run gets `--strict-mcp-config` instead.
+Known open hole (accepted, documented in the README): the project
+`.claude/settings.json` is also trusted under `-p`, so its `permissions.allow`
+can approve tools of any loaded server, connectors included, and its `hooks`
+run commands (the hooks part predates dropping strict). Closing it means
+`--setting-sources user,local` plus feeding the project `CLAUDE.md` files back
+through `--append-system-prompt`.
+Hiding unlisted servers is not possible cheaply: `allowedMcpServers` passed
+via `--settings` blocks every claude.ai connector whatever the pattern, and
+`deniedMcpServers` by display name works but needs the names from
+`claude mcp list` (~10 s, health-checks every server). File changes only happen
 through the nvim tools: `edit_file` lands in the buffer unsaved, disk writes
 (`write_file`, `save_file`) go through `confirm_write` (unasked by default,
 except the paths `auto.writes_blocker` flags).

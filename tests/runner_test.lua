@@ -92,6 +92,57 @@ check(vim.fn.filereadable(vim.fn.readfile(out .. ".path")[1]) == 0, "config remo
 local allowed = vim.split(after("--allowedTools") or "", ",")
 check(vim.tbl_contains(allowed, "mcp__linear") and vim.tbl_contains(allowed, "mcp__nvim"), "allowedTools: " .. table.concat(allowed, ","))
 check((after("--append-system-prompt") or ""):find("linear (tools mcp__linear__*)", 1, true) ~= nil, "system note names the server")
+check(json.mcpServers.nvim.alwaysLoad == true, "nvim exempt from tool search deferral")
+check(vim.tbl_contains(vim.split(after("--tools") or "", ","), "ToolSearch"), "ToolSearch in --tools")
+
+-- connectors: pre-approved by prefix and named in the note
+cfg.mcp_servers = {}
+cfg.connectors = { "Grafana Cloud" }
+local home = vim.fn.getcwd()
+local proj = vim.fn.tempname() .. "-proj"
+vim.fn.mkdir(proj .. "/sub", "p")
+vim.cmd.cd(proj .. "/sub")
+ask("connectors")
+args = vim.fn.readfile(out .. ".args")
+check(vim.tbl_contains(vim.split(after("--allowedTools") or "", ","), "mcp__claude_ai_Grafana_Cloud"), "connector pre-approved")
+check((after("--append-system-prompt") or ""):find("Grafana Cloud (tools mcp__claude_ai_Grafana_Cloud__*)", 1, true) ~= nil, "note names the connector")
+check(not vim.tbl_contains(args, "--strict-mcp-config") and after("--settings") == nil, "no .mcp.json: not strict, no denylist")
+cfg.connectors = {}
+local mcp = require("harner.mcp")
+check(mcp.servers_note():find("only mcp__nvim__ is approved", 1, true) ~= nil, "note: nvim only")
+cfg.allowed_tools = { "mcp__nvim", "mcp__claude_ai_Slack__slack_read_channel" }
+local note = mcp.servers_note()
+check(note:find("pre-approved: mcp__claude_ai_Slack__slack_read_channel.", 1, true) ~= nil and not note:find("only mcp__nvim__", 1, true), "note names allowed_tools MCP entries: " .. note)
+cfg.allowed_tools = { "mcp__nvim" }
+
+-- project .mcp.json servers (any parent dir) are denied by name; a file that
+-- does not parse or a name shared with mcp_servers falls back to strict
+vim.fn.writefile({ '{"mcpServers":{"evil":{"command":"sh"},"other":{"command":"sh"}}}' }, proj .. "/.mcp.json")
+ask("project servers")
+args = vim.fn.readfile(out .. ".args")
+local settings = vim.json.decode(after("--settings") or "{}")
+check(vim.deep_equal(settings.deniedMcpServers, { { serverName = "evil" }, { serverName = "other" } }), "project servers denied: " .. (after("--settings") or "nil"))
+check(not vim.tbl_contains(args, "--strict-mcp-config"), "deny instead of strict")
+cfg.mcp_servers = { evil = { type = "http", url = "https://example.com" } }
+ask("name clash")
+args = vim.fn.readfile(out .. ".args")
+check(vim.tbl_contains(args, "--strict-mcp-config") and after("--settings") == nil, "shared name: strict")
+cfg.mcp_servers = {}
+vim.fn.writefile({ "{ not json" }, proj .. "/.mcp.json")
+ask("broken mcp.json")
+args = vim.fn.readfile(out .. ".args")
+check(vim.tbl_contains(args, "--strict-mcp-config"), "unparsable .mcp.json: strict")
+vim.cmd.cd(home)
+vim.fn.delete(proj, "rf")
+
+-- --settings in extra_args would replace harner's own: refused, nothing spawned
+os.remove(out .. ".args")
+cfg.extra_args = { "--settings={}" }
+ask("own settings")
+text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
+check(text:find("--settings is not supported", 1, true) ~= nil, "extra_args --settings reported")
+check(vim.fn.filereadable(out .. ".args") == 0, "claude not started with --settings in extra_args")
+cfg.extra_args = {}
 
 -- a server named nvim is refused, nothing spawned
 os.remove(out .. ".args")

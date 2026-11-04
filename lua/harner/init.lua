@@ -13,8 +13,9 @@ M.config = {
 	claude_cmd = "claude",
 	model = nil, ---@type string|nil
 	width = 0.4, -- fraction of columns, or absolute columns if >= 1
-	-- built-in Claude tools made available (read-only set)
-	builtin_tools = { "Read", "Grep", "Glob", "WebFetch" },
+	-- built-in Claude tools made available (read-only set). ToolSearch defers
+	-- MCP tool schemas; without it every loaded server's schemas sit in context.
+	builtin_tools = { "Read", "Grep", "Glob", "WebFetch", "ToolSearch" },
 	-- pre-approved tools; `mcp__nvim` allows every tool from the nvim MCP server
 	allowed_tools = { "mcp__nvim" },
 	extra_args = {}, ---@type string[]
@@ -23,6 +24,11 @@ M.config = {
 	-- tools are pre-approved (mcp__<name>). OAuth servers work after a `/mcp`
 	-- login in interactive claude under the same name and URL; `nvim` is reserved.
 	mcp_servers = {}, ---@type table<string, table>
+	-- claude.ai connectors to pre-approve, by name as `claude mcp list` shows it
+	-- without the "claude.ai " prefix, e.g. { "Grafana Cloud" }. Whatever claude
+	-- loads (connectors, `claude mcp add`, plugins) is visible, but only nvim,
+	-- mcp_servers, allowed_tools and these are approved; the rest is denied.
+	connectors = {}, ---@type string[]
 	show_text = {
 		mode = "split", ---@type "split"|"vsplit"|"float"
 		float_width = 100,
