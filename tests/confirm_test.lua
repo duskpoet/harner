@@ -4,7 +4,7 @@ vim.o.columns = 120; vim.o.lines = 40
 -- Offline, in-process: the confirm float (full text, keys), per-chat grants
 -- from its `a` key, save_file with several paths, cancel closing an open
 -- confirm, and edit_file / open_file reusing windows instead of splitting.
-require("harner").setup({ auto = { enabled = false } })
+require("harner").setup({ auto = { enabled = false }, write_file = { confirm = true } })
 local tools = require("harner.tools")
 local confirm = require("harner.confirm")
 local function keys(s) vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(s, true, false, true), "x", false) end

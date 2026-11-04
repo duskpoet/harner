@@ -4,7 +4,7 @@ local root, check = t.root, t.check
 -- (writes, bash list), the classifier (allow / ask / timeout / cancel)
 -- against a fake `claude` script, transcript note marks. Offline.
 local harner = require("harner")
-harner.setup({})
+harner.setup({ write_file = { confirm = true } })
 harner.config.bash.enabled = true
 local tools = require("harner.tools")
 local chat = require("harner.chat")
@@ -110,6 +110,27 @@ check(not err and #prompts == 0 and vim.fn.readfile(proj .. "/a.txt")[1] == "hi"
 check(has_line("_→ nvim:write_file · a.txt · auto (rule)_"), "write note marked")
 txt, err = call("write_file", { path = ".nvim.lua", content = "print(1)" })
 check(err and #prompts == 1 and not vim.uv.fs_stat(proj .. "/.nvim.lua"), ".nvim.lua asked and declined")
+check(notes[1]:find(".nvim.lua: runs code when loaded", 1, true), "write note names the reason: " .. notes[1])
+
+-- write_file.confirm off (the default), auto off: plain writes never ask,
+-- blocked ones still do
+harner.config.write_file.confirm = false
+c.auto = false
+note("_→ nvim:write_file · b.txt_")
+txt, err = call("write_file", { path = "b.txt", content = "b\n" })
+check(not err and #prompts == 1 and vim.fn.readfile(proj .. "/b.txt")[1] == "b", "confirm off writes without prompt: " .. txt)
+check(has_line("_→ nvim:write_file · b.txt_"), "confirm-off write not marked auto")
+txt, err = call("write_file", { path = ".git/hooks/pre-commit", content = "x", create_dirs = true })
+check(err and #prompts == 2 and not vim.uv.fs_stat(proj .. "/.git/hooks/pre-commit"), "confirm off still asks for .git/")
+txt, err = call("write_file", { path = "/tmp/harner-outside-" .. vim.fn.getpid(), content = "x" })
+check(err and #prompts == 3, "confirm off still asks outside cwd")
+harner.config.write_file.confirm = true
+txt, err = call("write_file", { path = ".envrc", content = "x" })
+check(err and #prompts == 4 and notes[4]:find("runs code when loaded", 1, true),
+  "confirm on, auto off: blocked path shows its reason: " .. notes[4])
+c.auto = true
+-- later checks count from the .nvim.lua prompt
+while #prompts > 1 do table.remove(prompts); table.remove(notes) end
 
 -- bash rule: no prompt, no classifier, marked
 vim.cmd("cd " .. vim.fn.fnameescape(root))

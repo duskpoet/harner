@@ -846,7 +846,7 @@ M.tools.bash = {
 
 -- ---------------------------------------------------------------------------
 -- Editing: edit_file changes the buffer in place (unsaved, undoable); write_file
--- and save_file touch the disk and ask the user first.
+-- and save_file touch the disk, asking first only as confirm_write decides.
 
 ---Split text into lines; a trailing newline does not produce an empty last line.
 ---@param s string
@@ -894,28 +894,34 @@ local function write_buf(buf)
 	return (not ok) and tostring(e) or nil
 end
 
----Ask the user before a disk write unless config.write_file.confirm is off
----or they already allowed every write in this chat.
+---Ask the user before a disk write unless they already allowed every write
+---in this chat. Writes auto.writes_blocker flags (outside cwd, .git/,
+---.claude/, files that run code when loaded) always ask, with the reason as
+---the note; the rest ask only when config.write_file.confirm is on and auto
+---mode is off.
 ---@param title string
 ---@param body string[]
----In auto mode, writes the rules allow (auto.writes_ok) skip it too.
 ---@param yes string label of the confirming key
 ---@param target { tool: string, args: table, paths: string[] } the call, for auto mode
 ---@param cb fun(ok:boolean)
 local function confirm_write(title, body, yes, target, cb)
 	local g = grants()
-	if not require("harner").config.write_file.confirm or g.writes then
+	if g.writes then
 		cb(true)
 		return
 	end
 	local auto = require("harner.auto")
-	if auto.enabled() and auto.writes_ok(target.paths) then
-		pcall(require("harner.chat").mark_auto, target.tool, target.args, "rule")
+	local confirm_on = require("harner").config.write_file.confirm
+	local note = auto.writes_blocker(target.paths)
+	if not note and (not confirm_on or auto.enabled()) then
+		if confirm_on then
+			pcall(require("harner.chat").mark_auto, target.tool, target.args, "rule")
+		end
 		cb(true)
 		return
 	end
 	ask(
-		{ title = title, body = body, yes = yes, always = "allow all writes in this chat" },
+		{ title = title, body = body, yes = yes, note = note, always = "allow all writes in this chat" },
 		function(choice)
 			if choice == "always" then
 				g.writes = true
@@ -1261,7 +1267,7 @@ local function write_lines(path, lines)
 end
 
 M.tools.write_file = {
-	description = "Create a file or replace its whole contents; the user confirms the write first. Use it for new "
+	description = "Create a file or replace its whole contents on disk, usually without asking the user. Use it for new "
 		.. "files or complete rewrites, and edit_file for changes to existing files.",
 	inputSchema = schema({
 		path = { type = "string", description = "File path, absolute or relative to the working directory" },
@@ -1318,8 +1324,8 @@ M.tools.write_file = {
 }
 
 M.tools.save_file = {
-	description = "Save buffers with unsaved changes (for example after edit_file) to disk; the user confirms "
-		.. "first. After editing several files pass them all in `paths` so the user confirms once.",
+	description = "Save buffers with unsaved changes (for example after edit_file) to disk, usually without "
+		.. "asking the user. After editing several files pass them all in `paths` (at most one confirm).",
 	inputSchema = schema({
 		path = { type = "string", description = "File path, absolute or relative to the working directory" },
 		paths = { type = "array", items = { type = "string" }, description = "Several files to save at once" },

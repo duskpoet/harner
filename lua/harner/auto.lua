@@ -111,18 +111,21 @@ function M.write_blocker(path)
 	return nil
 end
 
----True when auto mode may write every path without asking.
+---Why writing `paths` must still be confirmed ("<file> <reason>" for the
+---first blocked one), or nil when every path may be written without asking.
 ---@param paths string[]
-function M.writes_ok(paths)
+---@return string|nil
+function M.writes_blocker(paths)
 	if #paths == 0 then
-		return false
+		return "nothing to write"
 	end
 	for _, p in ipairs(paths) do
-		if M.write_blocker(p) then
-			return false
+		local why = M.write_blocker(p)
+		if why then
+			return vim.fn.fnamemodify(p, ":~:.") .. ": " .. why
 		end
 	end
-	return true
+	return nil
 end
 
 -- ---------------------------------------------------------------------------

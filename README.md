@@ -69,8 +69,9 @@ A selection is passed by reference, not pasted: the prompt ends with a
 - display: `show_text` (scratch window with a filetype, `q` closes it),
   `open_file` (jump to a file and highlight a line range)
 - change: `edit_file` (str_replace-style edit applied to the buffer, unsaved
-  and undoable), `write_file` and `save_file` (disk writes, confirmed by you;
-  `save_file` takes several files under one confirm)
+  and undoable), `write_file` and `save_file` (disk writes, unasked except outside the
+  working directory, `.git/`, `.claude/` and files that run code when loaded;
+  `save_file` takes several files under at most one confirm)
 - interact: `ask_user` (question with optional choices), `run_command` (an Ex
   command, confirmed unless it starts with an entry of `run_command.allow`)
 - shell (opt-in, `bash = { enabled = true }`): `bash` runs a command with
@@ -90,8 +91,8 @@ A selection is passed by reference, not pasted: the prompt ends with a
   is told to say up front when a task needs a shell instead of stopping
   partway through.
 
-Commands and disk writes are confirmed in a small float that shows the full
-command or file list: `y` approves, `a` approves and stops asking for the rest
+Commands and the disk writes that ask are confirmed in a small float that
+shows the full command or file list: `y` approves, `a` approves and stops asking for the rest
 of the chat (that exact command, or all writes), `n` / `<Esc>` skips. Edited
 files are shown in your working window; if it holds unsaved changes of your
 own, harner splits once and reuses that window for every later file. If
@@ -105,9 +106,11 @@ Auto mode is on by default (the winbar shows `AUTO`); `<leader>ha` toggles it
 for the current chat, and a new chat starts at `auto.enabled`. Your allow-lists and `a` grants
 still apply first. Beyond them:
 
-- writes (`write_file`, `save_file`) inside the working directory run without
-  asking, except under `.git/` and `.claude/` (its hooks run commands) and files that run code when loaded
-  (`.nvim.lua`, `.nvimrc`, `.exrc`, `.lazy.lua`, `.envrc`);
+- with `write_file.confirm = true`, writes (`write_file`, `save_file`) inside
+  the working directory run without asking (with the default `false` they
+  never ask anyway), except under `.git/` and `.claude/` (its hooks run commands) and files that run code when loaded
+  (`.nvim.lua`, `.nvimrc`, `.exrc`, `.lazy.lua`, `.envrc`), which always ask,
+  auto mode or not;
 - a built-in list of read-only shell commands runs without asking (`git
   status|log|diff|show|blame`, read-only `git branch`, `ls`, `pwd`, `rg`, and
   `cat|head|tail|wc` on paths inside the working directory), plus your
@@ -158,7 +161,8 @@ require("harner").setup({
     allow = { "edit", "Telescope", "DiffviewOpen", "Git blame", "Git log", "Git diff" },
   },
   write_file = {
-    confirm = true,       -- ask before write_file / save_file touch the disk
+    confirm = false,      -- true: ask before every write_file / save_file (auto mode off);
+                          -- outside cwd, .git/, .claude/, .nvim.lua & co. always ask
   },
   bash = {
     enabled = false,      -- opt-in shell tool

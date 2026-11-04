@@ -120,9 +120,10 @@ All modules live in `lua/harner/`:
 - `auto.lua` — auto mode, a per-chat flag (`chat.auto`, default
   `config.auto.enabled`, on by default, tests that check confirms pin it off; winbar badge `AUTO`, reset by `<leader>hn`). After
   the existing short-circuits (confirm off, grants, allow-lists) it decides
-  before the confirm: `writes_ok(paths)` (inside the real cwd, not `.git/` or `.claude/` (hooks),
+  before the confirm: `writes_blocker(paths)` (nil = may write; inside the real cwd, not `.git/` or `.claude/` (hooks),
   not `.nvim.lua`/`.nvimrc`/`.exrc`/`.lazy.lua`/`.envrc`) for
-  write_file/save_file; `bash_ok(cmd)` (operator ban + built-in read-only list
+  write_file/save_file (only matters with `write_file.confirm = true`; the
+  `writes_blocker` paths ask even with confirm off or auto off); `bash_ok(cmd)` (operator ban + built-in read-only list
   with per-entry argument checks, e.g. no `--output`, no `rg --pre`, `git
   branch` read flags only, `cat`/`head`/`tail`/`wc` paths inside cwd, plus
   `config.auto.allow`); otherwise for bash/run_command `classify()` spawns
@@ -208,9 +209,12 @@ the latter re-indents `new_str` to the file's style (`reindent()`: tabs or
 `shiftwidth` spaces per level, levels inferred from Claude's own indentation).
 The result text says which fallback matched. `write_file` (`path`, `content`,
 `create_dirs`) replaces or creates a whole file and `save_file` (`path` and/or
-`paths`) writes modified buffers under one confirm; both ask through
-`confirm.lua` unless `config.write_file.confirm = false` or the chat has the
-write grant. The system note tells Claude to save several files in one call. Writes go through the
+`paths`) writes modified buffers under one confirm. `confirm_write` skips
+the confirm with the chat's write grant; otherwise paths
+`auto.writes_blocker` flags (outside cwd, `.git/`, `.claude/`, `.nvim.lua`
+& co.) always ask with the reason as `note`, and the rest ask only when
+`config.write_file.confirm = true` (default false; tests that check write
+confirms pin it on) and auto mode is off. The system note tells Claude to save several files in one call. Writes go through the
 buffer when one is loaded (`silent write`) so buffer and disk stay in sync,
 otherwise `writefile`. The system note carries Anthropic's "surgically edit a
 file rather than rewrite" line, which matters most on Fable.
@@ -240,7 +244,8 @@ Write / Bash exist at all; shell access is only the confirmed, opt-in
 (`mcp__nvim` approves every tool of the server named `nvim`). The server name in
 `mcp.lua` and the allow-list entry must stay in sync. File changes only happen
 through the nvim tools: `edit_file` lands in the buffer unsaved, disk writes
-(`write_file`, `save_file`) are confirmed by the user.
+(`write_file`, `save_file`) go through `confirm_write` (unasked by default,
+except the paths `auto.writes_blocker` flags).
 
 ## Conventions and gotchas
 

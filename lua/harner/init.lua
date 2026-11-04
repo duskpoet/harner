@@ -34,10 +34,13 @@ M.config = {
 		confirm = true,
 		allow = { "edit", "Telescope", "DiffviewOpen", "Git blame", "Git log", "Git diff" },
 	},
-	-- disk writes (write_file and save_file): ask the user (vim.ui.select) first.
+	-- disk writes (write_file and save_file): by default they go straight to
+	-- disk, except outside the working directory, under .git/ or .claude/, and
+	-- files that run code when loaded (.nvim.lua, .envrc, ...), which always
+	-- ask. `confirm = true` asks for every write while auto mode is off.
 	-- edit_file never asks: it changes the buffer, unsaved and undoable.
 	write_file = {
-		confirm = true,
+		confirm = false,
 	},
 	-- the bash tool: shell commands Claude may run in the working directory.
 	-- Off unless enabled. `confirm` asks before each command unless it starts
@@ -56,8 +59,8 @@ M.config = {
 	},
 	-- auto mode: fewer confirms, per chat (<leader>ha / :HarnerAuto toggles it,
 	-- a new chat starts at `enabled`). With it on, writes inside the working
-	-- directory (not .git/, .claude/ or files that run code when loaded, like .nvim.lua)
-	-- and built-in read-only bash commands (git status/log/diff/show/blame,
+	-- directory (not .git/, .claude/ or files that run code when loaded, like
+	-- .nvim.lua; only matters with write_file.confirm = true) and built-in read-only bash commands (git status/log/diff/show/blame,
 	-- ls, rg, ...) plus `allow` run without asking; other bash and run_command
 	-- calls go to a classifier (`claude -p --model <model>`) that either lets
 	-- them run or hands them to the normal confirm with its reason.
