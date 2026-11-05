@@ -78,14 +78,26 @@ for _, cmd in ipairs({ "git status", "git log -5 --oneline", "git diff HEAD~1", 
   "cat lua/harner/auto.lua", "head -n 5 README.md", "pwd" }) do
   check(auto.bash_ok(cmd), "rule allows " .. cmd)
 end
-for _, cmd in ipairs({ "git log | head", "git diff --output=/tmp/x", "git branch -D main", "git branch new",
+for _, cmd in ipairs({ "git diff --output=/tmp/x", "git branch -D main", "git branch new",
   "cat /etc/passwd", "cat ../x", "cat '/etc/passwd'", "cat ~/.ssh/id_rsa", "rg --pre sh x", "git push", "lsof",
   "rm -rf x" }) do
   check(not auto.bash_ok(cmd), "rule refuses " .. cmd)
 end
+-- chains: every part must pass; quotes respected; only harmless redirects
+for _, cmd in ipairs({ "git log | head", "git status && git diff", "git log --oneline -5; git status",
+  "rg 'a|b' lua | head -n 3", "git diff 2>&1 | head", "ls 2>/dev/null || pwd", 'rg "x;y" lua' }) do
+  check(auto.bash_ok(cmd), "rule allows chain " .. cmd)
+end
+for _, cmd in ipairs({ "git log | sh", "git status && rm -rf x", "git log > /tmp/x", "git log & rm x",
+  "ls $(rm x)", "rg \"$HOME\" lua", "ls `rm x`", "git diff \"a;rg \" --output=x", "git diff \"--output=x\"",
+  "git diff --out=x", "ls |", "&& ls", "ls 'unclosed", "git log 2>&1x", "ls\nrm x", "cat x | sh -c y" }) do
+  check(not auto.bash_ok(cmd), "rule refuses chain " .. vim.inspect(cmd))
+end
 harner.config.auto.allow = { "make test" }
 check(auto.bash_ok("make test") and not auto.bash_ok("make install"), "config.auto.allow extends the list")
 check(not auto.bash_ok("make test; rm x"), "operators still refused for config entries")
+check(not auto.bash_ok("make test 'X=$(shell rm x)'"), "quoted operators refused for config entries")
+check(auto.bash_ok("make test && git status"), "config entries chain")
 
 -- write rules (cwd = a temp project)
 local proj = vim.fn.tempname()
@@ -100,6 +112,22 @@ check(auto.write_blocker(proj .. "/.git/config") ~= nil, "write into .git refuse
 check(auto.write_blocker(proj .. "/sub/.nvim.lua") ~= nil, ".nvim.lua refused")
 check(auto.write_blocker(proj .. "/.claude/settings.json") ~= nil, ".claude/ refused")
 check(auto.write_blocker(proj .. "/.envrc") ~= nil, ".envrc refused")
+for _, p in ipairs({ "/.git", "/sub/.git", "/.git/modules/sub/hooks/pre-commit", "/.git/modules/sub/config", "/.git/worktrees/w/config" }) do
+  local _, hard = auto.write_blocker(proj .. p)
+  check(hard, "hard: " .. p)
+end
+local _, hard_cj = auto.write_blocker(vim.uv.os_homedir() .. "/.claude.json")
+check(hard_cj, "hard: ~/.claude.json")
+local why, soft = auto.write_blocker(proj .. "/.git/info/exclude")
+check(why and not soft, ".git/info/exclude is classified, not hard")
+local home = vim.uv.os_homedir()
+for _, p in ipairs({ home .. "/.claude/plugins/x/hooks/hooks.json", home .. "/.claude/hooks/run.sh",
+  proj .. "/.claude/commands/x.md", home .. "/.claude/projects/p/memory" }) do
+  local _, hard = auto.write_blocker(p)
+  check(hard, "hard: " .. p)
+end
+why, soft = auto.write_blocker(home .. "/.claude/projects/-tmp-p/memory/note.md")
+check(why and not soft, "memory note is classified, not hard")
 vim.uv.fs_symlink("/tmp", proj .. "/link")
 check(auto.write_blocker(proj .. "/link/x.txt") ~= nil, "symlink out of cwd refused")
 
@@ -191,6 +219,59 @@ local n = #prompts
 reply("ALLOW")
 txt, err = call("run_command", { cmd = "let g:harner_auto_test = 1" })
 check(not err and vim.g.harner_auto_test == 1 and #prompts == n, "run_command allowed by classifier: " .. txt)
+
+-- writes the rules flag go to the classifier; hard ones never do
+vim.cmd("cd " .. vim.fn.fnameescape(proj))
+local outside = vim.fn.tempname() .. "-note.md"
+reply("ALLOW")
+reset_classified()
+txt, err = call("write_file", { path = outside, content = "remember this\n" })
+check(not err and #prompts == n and vim.fn.readfile(outside)[1] == "remember this", "outside write allowed by classifier: " .. txt)
+stdin = table.concat(vim.fn.readfile(dir .. "/stdin"), "\n")
+check(stdin:find("outside the working directory", 1, true) and stdin:find("remember this", 1, true),
+  "classifier saw the reason and the content")
+reply("ASK: shell startup file")
+txt, err = call("write_file", { path = outside, content = "other\n" })
+check(err and #prompts == n + 1 and vim.fn.readfile(outside)[1] == "remember this", "classifier ASK prompts, declined")
+check(notes[#notes]:find("outside the working directory", 1, true) and notes[#notes]:find("shell startup file", 1, true),
+  "note has both reasons: " .. notes[#notes])
+reply("ALLOW")
+reset_classified()
+txt, err = call("write_file", { path = ".git/hooks/post-merge", content = "x", create_dirs = true })
+check(err and #prompts == n + 2 and not classified(), "hard block asks without classifying")
+check(notes[#notes]:find("runs code through git", 1, true), "hard note: " .. notes[#notes])
+txt, err = call("write_file", { path = ".claude/settings.local.json", content = "{}", create_dirs = true })
+check(err and #prompts == n + 3 and not classified(), ".claude/settings asks without classifying")
+-- save_file outside cwd: the classifier gets the diff
+vim.fn.writefile({ "old line" }, outside)
+local obuf = vim.fn.bufadd(outside)
+vim.fn.bufload(obuf)
+vim.api.nvim_buf_set_lines(obuf, 0, -1, false, { "new line" })
+reset_classified()
+txt, err = call("save_file", { path = outside })
+stdin = table.concat(vim.fn.readfile(dir .. "/stdin"), "\n")
+check(not err and vim.fn.readfile(outside)[1] == "new line", "save outside allowed by classifier: " .. txt)
+check(stdin:find("-old line", 1, true) and stdin:find("+new line", 1, true), "classifier saw the diff")
+vim.cmd("silent bwipeout! " .. obuf)
+vim.cmd("cd " .. vim.fn.fnameescape(root))
+n = #prompts
+
+-- decision log: rules, classifier and user answers; cancelled confirms not logged
+local log = require("harner.decisions").read()
+check(vim.fn.getfperm(t.decisions) == "rw-------", "log is private: " .. vim.fn.getfperm(t.decisions))
+local function count(pred)
+  local k = 0
+  for _, e in ipairs(log) do if pred(e) then k = k + 1 end end
+  return k
+end
+check(count(function(e) return e.how == "rule" and e.tool == "bash" and e.subject == "git status --short" end) == 1,
+  "log: bash rule")
+check(count(function(e) return e.how == "classifier" and e.tool == "write_file" end) == 1, "log: classifier write")
+check(count(function(e) return e.how == "user" and e.tool == "bash" and e.answer == "yes" end) == 1, "log: user yes")
+check(count(function(e) return e.how == "user" and e.tool == "write_file" and e.answer == "no"
+  and (e.note or ""):find("shell startup file", 1, true) end) == 1, "log: user no with note")
+check(count(function(e) return e.subject == "touch " .. cmarker .. " && true" end) == 0, "log: cancelled call not logged")
+check(require("harner.decisions").summary():find("| `bash  touch ", 1, true), "summary groups by command")
 
 -- auto off: confirm, no classifier
 auto.toggle()

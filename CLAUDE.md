@@ -124,13 +124,21 @@ All modules live in `lua/harner/`:
 - `auto.lua` — auto mode, a per-chat flag (`chat.auto`, default
   `config.auto.enabled`, on by default, tests that check confirms pin it off; winbar badge `AUTO`, reset by `<leader>hn`). After
   the existing short-circuits (confirm off, grants, allow-lists) it decides
-  before the confirm: `writes_blocker(paths)` (nil = may write; inside the real cwd, not `.git/` or `.claude/` (hooks),
-  not `.nvim.lua`/`.nvimrc`/`.exrc`/`.lazy.lua`/`.envrc`) for
-  write_file/save_file (only matters with `write_file.confirm = true`; the
-  `writes_blocker` paths ask even with confirm off or auto off); `bash_ok(cmd)` (operator ban + built-in read-only list
-  with per-entry argument checks, e.g. no `--output`, no `rg --pre`, `git
-  branch` read flags only, `cat`/`head`/`tail`/`wc` paths inside cwd, plus
-  `config.auto.allow`); otherwise for bash/run_command `classify()` spawns
+  before the confirm: `writes_blocker(paths)` returns `reason, hard` (nil =
+  may write: inside the real cwd, not `.git/` or `.claude/`). Hard
+  (`.nvim.lua`/`.nvimrc`/`.exrc`/`.lazy.lua`/`.envrc`, a `.git` file, any
+  `hooks/` or `config` below a `.git` part, anything below a `.claude` part
+  except files in `projects/<x>/memory/`, `~/.claude.json`) always asks; the other flagged writes go
+  to the classifier in auto mode (`details` = content, or `save_diff()` for
+  save_file) and ask with auto off. Unflagged writes only ask with
+  `write_file.confirm = true` and auto off. `bash_ok(cmd)` runs
+  `split_chain()` (quote-aware split at `&&`/`||`/`;`/`|`, nil on any other
+  operator, `$`/backtick/`\`/`!` in double quotes, unclosed quotes; only
+  `2>&1`-style redirects pass) and checks every part against the built-in
+  read-only list with per-entry argument checks on quote-stripped words
+  (no `--ou…` (git abbreviates `--output`), no `rg --pre`, `git branch`
+  read flags only, `cat`/`head`/`tail`/`wc` paths inside cwd) plus
+  `config.auto.allow`; otherwise for bash/run_command `classify()` spawns
   `claude -p --model haiku --tools "" --strict-mcp-config
   --no-session-persistence --system-prompt …` with the command, description,
   cwd and `chat.last_prompt` on stdin. `ALLOW` runs; `ASK: reason`, garbage,
@@ -142,6 +150,13 @@ All modules live in `lua/harner/`:
   `chat.mark_auto(tool, args, "rule"|"classifier")`, which finds the call's
   note above the last separator; `amend_tool_note` keeps the suffix if the
   mark came first. edit_file's save/drop question is never automated.
+- `decisions.lua` — JSONL decision log (`config.decisions.path`, default
+  `stdpath("state")/harner/decisions.jsonl`; tests/helper.lua points it at a
+  temp file). `auto_or_confirm`'s marks log `rule`/`classifier`; confirms
+  opened with `opts.log = {tool, subject}` log the user's answer in the `ask`
+  wrapper, skipped when the call is no longer pending (cancel declines are
+  not answers). `:HarnerDecisions` shows `summary()`. Planned next: feed
+  recent answers to the classifier as few-shot examples.
 - `tools.lua` — `M.tools[name] = {description, inputSchema, handler, async?}`.
   `list()` and `call(name, args)` are what the bridge invokes. Sync handlers
   return a string; errors become `isError = true` results. Async handlers
@@ -215,8 +230,9 @@ The result text says which fallback matched. `write_file` (`path`, `content`,
 `create_dirs`) replaces or creates a whole file and `save_file` (`path` and/or
 `paths`) writes modified buffers under one confirm. `confirm_write` skips
 the confirm with the chat's write grant; otherwise paths
-`auto.writes_blocker` flags (outside cwd, `.git/`, `.claude/`, `.nvim.lua`
-& co.) always ask with the reason as `note`, and the rest ask only when
+`auto.writes_blocker` flags (outside cwd, `.git/`, `.claude/`) go through
+`auto_or_confirm` (classifier in auto mode), hard ones (`.nvim.lua` & co.)
+always ask, both with the reason as `note`, and the rest ask only when
 `config.write_file.confirm = true` (default false; tests that check write
 confirms pin it on) and auto mode is off. The system note tells Claude to save several files in one call. Writes go through the
 buffer when one is loaded (`silent write`) so buffer and disk stay in sync,

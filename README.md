@@ -108,13 +108,22 @@ still apply first. Beyond them:
 
 - with `write_file.confirm = true`, writes (`write_file`, `save_file`) inside
   the working directory run without asking (with the default `false` they
-  never ask anyway), except under `.git/` and `.claude/` (its hooks run commands) and files that run code when loaded
-  (`.nvim.lua`, `.nvimrc`, `.exrc`, `.lazy.lua`, `.envrc`), which always ask,
-  auto mode or not;
+  never ask anyway);
+- writes outside the working directory or under `.git/` / `.claude/` go to
+  the classifier below (it also sees the content, or the diff for
+  `save_file`). Files that run code or grant permissions always ask, auto
+  mode or not: `.nvim.lua`, `.nvimrc`, `.exrc`, `.lazy.lua`, `.envrc`,
+  a `.git` file, `hooks/` and `config` under `.git/` (submodules and
+  worktrees included),
+  everything under a `.claude/` dir (project or `~`: settings, hooks and
+  their scripts, plugins) except memory notes in `projects/<x>/memory/`, and
+  `~/.claude.json`;
 - a built-in list of read-only shell commands runs without asking (`git
   status|log|diff|show|blame`, read-only `git branch`, `ls`, `pwd`, `rg`, and
   `cat|head|tail|wc` on paths inside the working directory), plus your
-  `auto.allow` entries; shell operators still rule a command out;
+  `auto.allow` entries. Chains (`&&`, `||`, `;`, `|`) pass when every part
+  does; quotes are respected and `2>&1` / `2>/dev/null` are allowed, any
+  other operator, redirect, `$` or backtick rules the command out;
 - every other `bash` and `run_command` call goes to a classifier
   (`claude -p --model haiku`, no tools) that sees the command, Claude's
   description and your latest message. It either lets the call run or opens
@@ -124,6 +133,11 @@ still apply first. Beyond them:
 
 Calls that ran unasked are marked in the transcript, e.g.
 `→ nvim:bash · $ git log -5 · auto (rule)` or `· auto (classifier)`.
+
+Every decision (rule, classifier, or your answer to a confirm) is appended
+to `decisions.path` (default `stdpath("state")/harner/decisions.jsonl`).
+`:HarnerDecisions` summarises it by tool and command, so you can see what
+still asks and add `auto.allow` entries for it.
 
 The confirm float has its own highlight groups so it stands out from the
 code behind it: `HarnerConfirmBorder`, `HarnerConfirmTitle` and
@@ -179,6 +193,10 @@ require("harner").setup({
     allow = {},           -- extra bash prefixes that run without asking
     model = "haiku",      -- classifier model
     timeout = 15,         -- classifier seconds before falling back to asking
+  },
+  decisions = {           -- decision log, :HarnerDecisions
+    enabled = true,
+    path = nil,           -- default stdpath("state")/harner/decisions.jsonl
   },
   keys = {                -- set an entry to false to skip it
     group = "<leader>h",  -- which-key group label

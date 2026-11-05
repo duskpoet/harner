@@ -69,12 +69,20 @@ M.config = {
 	-- .nvim.lua; only matters with write_file.confirm = true) and built-in read-only bash commands (git status/log/diff/show/blame,
 	-- ls, rg, ...) plus `allow` run without asking; other bash and run_command
 	-- calls go to a classifier (`claude -p --model <model>`) that either lets
-	-- them run or hands them to the normal confirm with its reason.
+	-- them run or hands them to the normal confirm with its reason. Writes the
+	-- rules flag (outside cwd, .git/, .claude/) go to the classifier too, except
+	-- files that run code or grant permissions (.nvim.lua, .envrc, .git/hooks/,
+	-- .git/config, .claude/settings*.json), which always ask.
 	auto = {
 		enabled = true,
 		allow = {}, ---@type string[] extra bash prefixes (whole words, no shell operators)
 		model = "haiku",
 		timeout = 15, -- seconds for the classifier; on timeout the user is asked
+	},
+	-- log of what auto mode and the user decided (:HarnerDecisions summarises it)
+	decisions = {
+		enabled = true,
+		path = nil, ---@type string|nil default stdpath("state")/harner/decisions.jsonl
 	},
 	-- global normal-mode keymaps; set one to false to skip it
 	keys = {
@@ -123,6 +131,9 @@ function M.setup(opts)
 	vim.api.nvim_create_user_command("HarnerAuto", function()
 		require("harner.auto").toggle()
 	end, { desc = "Toggle harner auto mode for the current chat" })
+	vim.api.nvim_create_user_command("HarnerDecisions", function()
+		require("harner.decisions").show()
+	end, { desc = "Summarise what harner asked and how it was answered" })
 	vim.api.nvim_create_user_command("HarnerAsk", function(cmd)
 		local ref = nil
 		if cmd.range > 0 then

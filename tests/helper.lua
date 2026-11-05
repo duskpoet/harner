@@ -6,6 +6,9 @@ local M = {}
 
 M.root = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h:h")
 vim.opt.rtp:prepend(M.root)
+-- keep the decision log out of the user's state dir (setup() deep-extends, so this survives)
+M.decisions = vim.fn.tempname() .. "-decisions.jsonl"
+require("harner").config.decisions.path = M.decisions
 
 M.fails = 0
 

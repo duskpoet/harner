@@ -445,9 +445,22 @@ local classifying = {}
 ---       (after the auto-mode classifier answered)
 ask = function(opts, cb, id)
 	id = id or calling
+	-- opts.log = { tool, subject }: record the user's answer in the decision log
+	local log = opts.log
+	opts.log = nil
 	local close = require("harner.confirm").ask(opts, function(choice, index)
 		if id then
 			asking[id] = nil
+		end
+		-- a decline from cancel_pending lands after the call ended: not an answer
+		if log and (not id or M.is_pending(id)) then
+			require("harner.decisions").record({
+				tool = log.tool,
+				subject = log.subject,
+				how = "user",
+				answer = choice,
+				note = opts.note,
+			})
 		end
 		cb(choice, index)
 	end)
@@ -490,7 +503,7 @@ end
 ---@param id integer|nil pending call id
 ---@param tool string tool name ("bash", "run_command")
 ---@param args table the call's arguments (to find its transcript note)
----@param action { kind: string, command: string, description: string|nil }
+---@param action { kind: string, command: string, description: string|nil, details: string|nil }
 ---@param rule_ok boolean the static rules allow it
 ---@param run fun()
 ---@param confirm fun(note: string|nil)
@@ -502,6 +515,7 @@ local function auto_or_confirm(id, tool, args, action, rule_ok, run, confirm)
 	end
 	local function mark(how)
 		pcall(require("harner.chat").mark_auto, tool, args, how)
+		require("harner.decisions").record({ tool = tool, subject = action.command, how = how })
 	end
 	if rule_ok then
 		mark("rule")
@@ -592,6 +606,7 @@ M.tools.run_command = {
 				yes = "run",
 				always = "always run this command in this chat",
 				note = note,
+				log = { tool = "run_command", subject = ":" .. cmd },
 			}, function(choice)
 				if choice == "always" then
 					grants().commands[cmd] = true
@@ -820,6 +835,7 @@ M.tools.bash = {
 				yes = "run",
 				always = "always run this command in this chat",
 				note = note,
+				log = { tool = "bash", subject = cmd },
 			}, function(choice)
 				if choice == "always" then
 					grants().shell[cmd] = true
@@ -896,13 +912,14 @@ end
 
 ---Ask the user before a disk write unless they already allowed every write
 ---in this chat. Writes auto.writes_blocker flags (outside cwd, .git/,
----.claude/, files that run code when loaded) always ask, with the reason as
----the note; the rest ask only when config.write_file.confirm is on and auto
----mode is off.
+---.claude/) go to the auto-mode classifier and ask when it says so or auto
+---mode is off; hard ones (files that run code or grant permissions) always
+---ask. The rest ask only when config.write_file.confirm is on and auto mode
+---is off.
 ---@param title string
 ---@param body string[]
 ---@param yes string label of the confirming key
----@param target { tool: string, args: table, paths: string[] } the call, for auto mode
+---@param target { tool: string, args: table, paths: string[], details: string|(fun(): string)|nil } the call, for auto mode (details only built for the classifier)
 ---@param cb fun(ok:boolean)
 local function confirm_write(title, body, yes, target, cb)
 	local g = grants()
@@ -912,23 +929,52 @@ local function confirm_write(title, body, yes, target, cb)
 	end
 	local auto = require("harner.auto")
 	local confirm_on = require("harner").config.write_file.confirm
-	local note = auto.writes_blocker(target.paths)
-	if not note and (not confirm_on or auto.enabled()) then
+	local blocked, hard = auto.writes_blocker(target.paths)
+	local subject = table.concat(
+		vim.tbl_map(function(p)
+			return vim.fn.fnamemodify(p, ":~")
+		end, target.paths),
+		"\n"
+	)
+	if not blocked and (not confirm_on or auto.enabled()) then
 		if confirm_on then
 			pcall(require("harner.chat").mark_auto, target.tool, target.args, "rule")
+			require("harner.decisions").record({ tool = target.tool, subject = subject, how = "rule" })
 		end
 		cb(true)
 		return
 	end
-	ask(
-		{ title = title, body = body, yes = yes, note = note, always = "allow all writes in this chat" },
-		function(choice)
+	local id = calling
+	local function confirm(why)
+		local note = blocked
+		if why then
+			note = note and (note .. " · " .. why) or why
+		end
+		ask({
+			title = title,
+			body = body,
+			yes = yes,
+			note = note,
+			always = "allow all writes in this chat",
+			log = { tool = target.tool, subject = subject },
+		}, function(choice)
 			if choice == "always" then
 				g.writes = true
 			end
 			cb(choice ~= "no")
-		end
-	)
+		end, id)
+	end
+	if not blocked or hard then
+		confirm()
+		return
+	end
+	auto_or_confirm(id, target.tool, target.args, {
+		kind = "file write (" .. target.tool .. "); the rules flagged " .. blocked,
+		command = subject,
+		details = type(target.details) == "function" and target.details() or target.details,
+	}, false, function()
+		cb(true)
+	end, confirm)
 end
 
 ---Byte offsets of every exact occurrence of `needle` in `text`.
@@ -1302,7 +1348,7 @@ M.tools.write_file = {
 		else
 			what = string.format("new file, %d lines", #lines)
 		end
-		local target = { tool = "write_file", args = args, paths = { path } }
+		local target = { tool = "write_file", args = args, paths = { path }, details = args.content }
 		confirm_write("harner: Claude wants to write", { name, "(" .. what .. ")" }, "write", target, function(ok)
 			if not ok then
 				resolve("The user declined to write " .. name .. ".", true)
@@ -1322,6 +1368,22 @@ M.tools.write_file = {
 		end)
 	end,
 }
+
+---Unified diff, disk -> buffer, of the buffers save_file is about to write
+---(what the auto-mode classifier reads).
+---@param bufs integer[]
+---@return string
+local function save_diff(bufs)
+	local out = {}
+	for _, buf in ipairs(bufs) do
+		local name = vim.api.nvim_buf_get_name(buf)
+		local old = vim.uv.fs_stat(name) and table.concat(vim.fn.readfile(name), "\n") .. "\n" or ""
+		local new = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n") .. "\n"
+		local ok, d = pcall((vim.text and vim.text.diff) or vim.diff, old, new, { ctxlen = 2 })
+		out[#out + 1] = "--- " .. rel(name) .. "\n" .. (ok and d or "(no diff)")
+	end
+	return table.concat(out, "\n")
+end
 
 M.tools.save_file = {
 	description = "Save buffers with unsaved changes (for example after edit_file) to disk, usually without "
@@ -1374,6 +1436,9 @@ M.tools.save_file = {
 			paths = vim.tbl_map(function(b)
 				return vim.api.nvim_buf_get_name(b)
 			end, todo),
+			details = function()
+				return save_diff(todo)
+			end,
 		}
 		confirm_write(title, names, "save", target, function(ok)
 			if not ok then
