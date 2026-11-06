@@ -140,8 +140,14 @@ All modules live in `lua/harner/`:
   read flags only, `cat`/`head`/`tail`/`wc` paths inside cwd) plus
   `config.auto.allow`; otherwise for bash/run_command `classify()` spawns
   `claude -p --model haiku --tools "" --strict-mcp-config
-  --no-session-persistence --system-prompt …` with the command, description,
-  cwd and `chat.last_prompt` on stdin. `ALLOW` runs; `ASK: reason`, garbage,
+  --no-session-persistence --setting-sources "" --system-prompt …` (no
+  setting sources so CLAUDE.md files don't leak into the verdict;
+  `auth_settings()` carries the user settings' `env` over as process env and
+  `apiKeyHelper`/`aws*`/`gcpAuthRefresh` via `--settings`) with the
+  command, description, cwd and `chat.last_prompt` on stdin. The prompt says
+  read-only is ALLOW whatever the request (slash commands are skills it can't
+  see) and only side effects may ASK; the reply may carry one reasoning line,
+  the verdict is the last non-empty line (`parse()`). `ALLOW` runs; `ASK: reason`, garbage,
   failure or timeout (`config.auto.timeout`) opens the confirm with the reason
   as `note` (a dimmed virt line). It never denies. `tools.auto_or_confirm`
   wires it in; the classifier answers after the handler returned, so it

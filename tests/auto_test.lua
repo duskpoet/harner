@@ -27,12 +27,20 @@ vim.fn.writefile({
   "#!/bin/sh",
   'printf "%s\\n" "$@" > ' .. dir .. "/argv",
   "cat > " .. dir .. "/stdin",
+  'printf "%s\\n%s" "$HARNER_TEST_ENV" "$PATH" > ' .. dir .. "/env",
   "[ -f " .. dir .. "/sleep ] && sleep 3",
   "touch " .. dir .. "/finished",
   "cat " .. dir .. "/reply",
 }, fake)
 vim.fn.setfperm(fake, "rwxr-xr-x")
 harner.config.claude_cmd = fake
+-- user settings the classifier must keep under --setting-sources ""
+vim.env.CLAUDE_CONFIG_DIR = dir
+vim.fn.writefile({ vim.json.encode({
+  env = { HARNER_TEST_ENV = "from-settings", N = 3 },
+  apiKeyHelper = "echo key",
+  hooks = { Stop = {} },
+}) }, dir .. "/settings.json")
 local function reply(s) vim.fn.writefile({ s }, dir .. "/reply") end
 local function classified() return vim.uv.fs_stat(dir .. "/stdin") ~= nil end
 local function reset_classified() os.remove(dir .. "/stdin") end
@@ -179,6 +187,42 @@ check(stdin:find("echo one | tr o 0", 1, true) and stdin:find("replace letters",
   and stdin:find("show me the recent history", 1, true), "classifier saw command, description and prompt")
 local argv = vim.fn.readfile(dir .. "/argv")
 check(vim.tbl_contains(argv, "haiku") and vim.tbl_contains(argv, "--no-session-persistence"), "classifier argv")
+local si = vim.fn.index(argv, "--setting-sources")
+check(si >= 0 and argv[si + 2] == "", "classifier runs without setting sources (no CLAUDE.md)")
+local ss = vim.fn.index(argv, "--settings")
+check(ss >= 0 and vim.deep_equal(vim.json.decode(argv[ss + 2]), { apiKeyHelper = "echo key" }),
+  "classifier keeps apiKeyHelper only: " .. tostring(argv[ss + 2]))
+local child_env = vim.fn.readfile(dir .. "/env")
+check(child_env[1] == "from-settings", "classifier gets the settings env")
+check(child_env[2] == vim.env.PATH, "settings env is merged into the inherited one (PATH kept)")
+local env_t = auto.auth_settings()
+check(env_t and env_t.N == "3", "env values stringified")
+
+-- the prompt bounds its read-only examples (they used to anchor haiku on
+-- `sed -n 'e …'`, `awk system()`, `find -exec`, `echo $(…)`)
+local sys = table.concat(argv, "\n") -- the fake writes one line per arg, the prompt spans several
+for _, s in ipairs({ "sed without -i", "awk without system()", "find without -delete, -exec",
+  "as long as every command inside them only reads" }) do
+  check(sys:find(s, 1, true), "prompt bounds read-only: " .. s)
+end
+
+-- parse: the verdict is the last non-empty line
+local function parsed(s) return { auto.parse(s) } end
+check(vim.deep_equal(parsed("ALLOW"), { true }), "parse ALLOW")
+check(vim.deep_equal(parsed("**ALLOW**\n"), { true }), "parse bold ALLOW")
+check(vim.deep_equal(parsed("ASK: x\nreads only, so reconsidering:\nALLOW"), { true }), "parse last-line ALLOW")
+check(vim.deep_equal(parsed("posts a review.\nASK: remote write"), { false, "remote write" }), "parse last-line ASK")
+check(vim.deep_equal(parsed("Verdict: `ASK: pushes`"), { false, "pushes" }), "parse Verdict: prefix")
+check(vim.deep_equal(parsed("reads.\n**Verdict:** ALLOW"), { true }), "parse bold Verdict: prefix")
+check(select(2, auto.parse("hmm, ALLOW I guess")):find("hmm, ALLOW I guess", 1, true), "no verdict keeps the line")
+check(vim.deep_equal(parsed("ASK: `git worktree remove --force` deletes"), { false, "`git worktree remove --force` deletes" }),
+  "reason keeps inner code markup")
+check(vim.deep_equal(parsed("**ASK: remote write**"), { false, "remote write" }), "reason trims outer markup")
+local long = select(2, auto.parse(string.rep("a", 116) .. "—" .. string.rep("b", 20)))
+check(vim.fn.strtrans(long) == long and long:find("a—%.%.%.$"), "long no-verdict cut on a character: " .. long)
+check(not auto.parse("ALLOW\nmaybe not"), "trailing chatter is no verdict")
+check(not auto.parse("ALLOWED if you like"), "ALLOW must stand alone")
+check(not auto.parse(""), "empty is no verdict")
 
 -- classifier ASK: normal confirm with the reason
 reply("ASK: pushes to a remote")
