@@ -201,6 +201,10 @@ require("harner").setup({
     mode = "split",       -- "split" | "vsplit" | "float"
     float_width = 100,
   },
+  title = {
+    enabled = false,      -- mirror the chat state into the terminal title ('titlestring')
+    prefix = "",          -- string or function, e.g. the ssh/dtach session the editor runs in
+  },
   run_command = {
     confirm = true,       -- ask before each command not covered by `allow`
     allow = { "edit", "Telescope", "DiffviewOpen", "Git blame", "Git log", "Git diff" },

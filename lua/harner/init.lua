@@ -34,6 +34,15 @@ M.config = {
 		mode = "split", ---@type "split"|"vsplit"|"float"
 		float_width = 100,
 	},
+	-- terminal title: mirror the chat state ("thinking…", "running Grep", "idle")
+	-- into 'titlestring' so the terminal tab shows what Claude is doing. Works
+	-- through ssh/dtach since nvim emits a plain OSC 2. `prefix` is a string or
+	-- a function returning one, e.g. to show the dt session the editor runs in:
+	--   prefix = function() return vim.env.DT_NAME and ("dt @ " .. vim.env.DT_NAME .. " · ") or "" end
+	title = {
+		enabled = false,
+		prefix = "", ---@type string|fun(): string
+	},
 	-- the run_command tool: Ex commands Claude may run. `confirm` asks the user
 	-- (a confirm float) before each command unless it starts with an `allow` entry
 	-- (matched as whole words: "Git log" allows "Git log --oneline", not "Git logx").

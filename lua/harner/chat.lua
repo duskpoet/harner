@@ -166,6 +166,13 @@ local function set_winbar(chat, state)
 		vim.wo[win].winhighlight = "WinBar:HarnerWinBar,WinBarNC:HarnerWinBarNC"
 		vim.wo[win].winbar = string.format("%%#Title# harner #%d %%* %s%s", chat.id, state, badge)
 	end
+	local cfg = require("harner").config.title
+	if cfg and cfg.enabled then
+		local prefix = type(cfg.prefix) == "function" and cfg.prefix() or cfg.prefix or ""
+		vim.o.title = true
+		-- 'titlestring' is evaluated like 'statusline' when it contains '%'
+		vim.o.titlestring = (prefix .. "harner " .. state):gsub("%%", "%%%%")
+	end
 end
 
 ---Redraw the winbar with its current state (after toggling auto mode).
