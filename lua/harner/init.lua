@@ -1,11 +1,12 @@
 -- harner: chat with `claude -p` from a Neovim split. Claude gets MCP tools that
 -- read the editor and display content back in it.
 --
--- One chat session per nvim instance. The <leader>h keymaps work from any
+-- Any number of chats per nvim instance, kept until nvim exits (closing or
+-- deleting a chat buffer only hides it). The <leader>h keymaps work from any
 -- window: <leader>hh opens an input popup for the current chat (from visual
 -- mode it attaches a reference to the selection that Claude reads itself),
 -- <leader>ht toggles the chat split, <leader>hn starts a fresh session,
--- <leader>hx cancels the running request.
+-- <leader>hl picks another chat, <leader>hx cancels the running request.
 
 local M = {}
 
@@ -34,7 +35,7 @@ M.config = {
 		float_width = 100,
 	},
 	-- the run_command tool: Ex commands Claude may run. `confirm` asks the user
-	-- (vim.ui.select) before each command unless it starts with an `allow` entry
+	-- (a confirm float) before each command unless it starts with an `allow` entry
 	-- (matched as whole words: "Git log" allows "Git log --oneline", not "Git logx").
 	run_command = {
 		confirm = true,
@@ -84,6 +85,19 @@ M.config = {
 		enabled = true,
 		path = nil, ---@type string|nil default stdpath("state")/harner/decisions.jsonl
 	},
+	-- web UI: one host process per user (started on demand, exits `idle_exit`
+	-- seconds after the last nvim left) mirrors every nvim's chats and lets a
+	-- browser read them, answer questions and confirms, send prompts and
+	-- cancel. It can approve shell commands, so it is off by default; plain
+	-- HTTP, reach it over a tailnet or an ssh tunnel only.
+	web = {
+		enabled = false,
+		host = "127.0.0.1", -- address to bind, e.g. your tailnet IP
+		port = 7337,
+		idle_exit = 300,
+		socket = nil, ---@type string|nil default $XDG_RUNTIME_DIR/harner/host.sock
+		token_file = nil, ---@type string|nil default stdpath("state")/harner/web-token
+	},
 	-- global normal-mode keymaps; set one to false to skip it
 	keys = {
 		group = "<leader>h", -- which-key group label, false to skip
@@ -92,6 +106,7 @@ M.config = {
 		new = "<leader>hn", -- fresh chat (new Claude session)
 		cancel = "<leader>hx", -- cancel the running request
 		auto = "<leader>ha", -- toggle auto mode for the current chat
+		list = "<leader>hl", -- pick one of this nvim's chats (:HarnerChats)
 	},
 	-- the input popup (<leader>hh / :HarnerAsk)
 	prompt = {
@@ -128,6 +143,12 @@ function M.setup(opts)
 	vim.api.nvim_create_user_command("HarnerCancel", function()
 		chat().cancel()
 	end, { desc = "Cancel the running harner request" })
+	vim.api.nvim_create_user_command("HarnerChats", function()
+		chat().pick()
+	end, { desc = "Pick a harner chat to show" })
+	vim.api.nvim_create_user_command("HarnerWeb", function()
+		require("harner.web").show_url()
+	end, { desc = "Show (and copy) the harner web UI sign-in URL" })
 	vim.api.nvim_create_user_command("HarnerAuto", function()
 		require("harner.auto").toggle()
 	end, { desc = "Toggle harner auto mode for the current chat" })
@@ -164,8 +185,15 @@ function M.setup(opts)
 			if tools then
 				tools.kill_running(nil, true)
 			end
+			local web = package.loaded["harner.web"]
+			if web then
+				web.stop()
+			end
 		end,
 	})
+	if M.config.web.enabled then
+		require("harner.web").start()
+	end
 
 	map(keys.ask, function()
 		prompt().open()
@@ -187,6 +215,9 @@ function M.setup(opts)
 	map(keys.auto, function()
 		require("harner.auto").toggle()
 	end, "Harner: toggle auto mode")
+	map(keys.list, function()
+		chat().pick()
+	end, "Harner: pick a chat")
 	if keys.group and keys.group ~= "" then
 		local ok, wk = pcall(require, "which-key")
 		if ok and wk.add then

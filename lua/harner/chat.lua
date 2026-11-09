@@ -1,26 +1,39 @@
--- Chat buffer: a markdown scratch buffer in a right-hand vertical split.
+-- Chats: markdown transcripts shown in a right-hand vertical split.
 -- Everything below the last separator line is the pending input.
--- One chat is "current" per nvim instance; the input popup (prompt.lua) and
--- the <leader>h keymaps always talk to that one.
+--
+-- An nvim holds any number of chats, each with its own Claude session and its
+-- own run (runs may overlap). A chat outlives its buffer: closing the window
+-- hides it, and `:bdelete` / `:bwipeout` only detach the view. The lines are
+-- kept and the buffer is rebuilt when the chat is shown or written to again.
+-- `M.current` is the chat the popup and the <leader>h keymaps talk to;
+-- `:HarnerChats` switches it.
 
 local M = {}
 
 local SEP = string.rep("─", 40)
 
 ---@class HarnerChat
----@field buf integer
+---@field id integer
+---@field buf integer|nil view buffer, nil while detached
+---@field lines string[]|nil transcript kept while detached
+---@field stale_buf integer|nil detached buffer still to be wiped (its name is reused)
 ---@field session_id string
 ---@field started boolean
+---@field title string|nil first line of the first prompt
 ---@field run HarnerRun|nil
 ---@field origin_win integer|nil
 ---@field tool_line integer|nil 1-based line of the last tool note, amended when the input arrives
 ---@field auto boolean auto mode (fewer confirms, see auto.lua)
 ---@field last_prompt string|nil the user's latest message (classifier context)
 ---@field state string|nil last winbar state
+---@field grants table|nil `a` approvals (tools.lua)
 
 ---@type table<integer, HarnerChat>
 M.chats = {}
-M.current = nil ---@type integer|nil
+M.current = nil ---@type integer|nil chat id
+-- chat id an nvim tool call runs for (set by tools.call around handlers and
+-- their callbacks); nil outside a call
+M.ctx = nil ---@type integer|nil
 local counter = 0
 
 local function uuid()
@@ -38,13 +51,44 @@ local function uuid()
 	return s:sub(1, 8) .. "-" .. s:sub(9, 12) .. "-" .. s:sub(13, 16) .. "-" .. s:sub(17, 20) .. "-" .. s:sub(21, 32)
 end
 
-local function is_chat_buf(buf)
-	return M.chats[buf] ~= nil
+---The chat a buffer shows, if any.
+---@param buf integer
+---@return HarnerChat|nil
+function M.by_buf(buf)
+	for _, c in pairs(M.chats) do
+		if c.buf == buf then
+			return c
+		end
+	end
+	return nil
+end
+
+---The chat a tool call belongs to (`M.ctx`), else the current one.
+---@return HarnerChat|nil
+function M.active()
+	return (M.ctx and M.chats[M.ctx]) or (M.current and M.chats[M.current]) or nil
+end
+
+local function loaded(chat)
+	return chat.buf ~= nil and vim.api.nvim_buf_is_valid(chat.buf) and vim.api.nvim_buf_is_loaded(chat.buf)
 end
 
 local function chat_win(chat)
+	if not loaded(chat) then
+		return nil
+	end
 	for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
 		if vim.api.nvim_win_get_buf(win) == chat.buf then
+			return win
+		end
+	end
+	return nil
+end
+
+---Any window in the current tab showing a chat.
+local function any_chat_win()
+	for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+		if vim.api.nvim_win_get_config(win).relative == "" and M.by_buf(vim.api.nvim_win_get_buf(win)) then
 			return win
 		end
 	end
@@ -64,17 +108,17 @@ local function usable_origin(win)
 		return false
 	end
 	local buf = vim.api.nvim_win_get_buf(win)
-	return not is_chat_buf(buf) and vim.bo[buf].buftype == ""
+	return M.by_buf(buf) == nil and vim.bo[buf].buftype == ""
 end
 
 ---The window display tools should act on: a non-chat, non-floating window in
----the current tab. Prefers the window the user came from.
+---the current tab. Prefers the window the active chat's user came from.
 ---@return integer
 function M.target_win()
 	local function usable(win)
 		return usable_origin(win) and vim.api.nvim_win_get_tabpage(win) == vim.api.nvim_get_current_tabpage()
 	end
-	local chat = M.current and M.chats[M.current]
+	local chat = M.active()
 	if chat and usable(chat.origin_win) then
 		return chat.origin_win
 	end
@@ -112,11 +156,15 @@ vim.api.nvim_create_autocmd("ColorScheme", {
 
 local function set_winbar(chat, state)
 	chat.state = state
+	local web = package.loaded["harner.web"]
+	if web then
+		web.on_meta(chat)
+	end
 	local win = chat_win(chat)
 	if win then
 		local badge = chat.auto and " %#DiagnosticWarn#AUTO%*" or ""
 		vim.wo[win].winhighlight = "WinBar:HarnerWinBar,WinBarNC:HarnerWinBarNC"
-		vim.wo[win].winbar = string.format("%%#Title# harner %%* %s%s", state, badge)
+		vim.wo[win].winbar = string.format("%%#Title# harner #%d %%* %s%s", chat.id, state, badge)
 	end
 end
 
@@ -124,6 +172,18 @@ end
 ---@param chat HarnerChat
 function M.refresh_winbar(chat)
 	set_winbar(chat, chat.state or (chat.run and "thinking…" or "idle"))
+end
+
+local attach_buf -- forward
+
+---The chat's buffer, rebuilt from the kept lines when it was deleted.
+---@param chat HarnerChat
+---@return integer
+local function buf_of(chat)
+	if not loaded(chat) then
+		attach_buf(chat)
+	end
+	return chat.buf --[[@as integer]]
 end
 
 local function last_sep_index(buf)
@@ -152,7 +212,7 @@ local function scroll_to_end(chat)
 end
 
 local function append_text(chat, text)
-	local buf = chat.buf
+	local buf = buf_of(chat)
 	local n = vim.api.nvim_buf_line_count(buf)
 	local last = vim.api.nvim_buf_get_lines(buf, n - 1, n, false)[1] or ""
 	local parts = vim.split(text, "\n", { plain = true })
@@ -169,7 +229,7 @@ local function append_text(chat, text)
 end
 
 local function append_lines(chat, lines)
-	vim.api.nvim_buf_set_lines(chat.buf, -1, -1, false, lines)
+	vim.api.nvim_buf_set_lines(buf_of(chat), -1, -1, false, lines)
 	scroll_to_end(chat)
 end
 
@@ -242,7 +302,7 @@ end
 
 ---Write the tool note for `name` at the end of the transcript.
 local function note_tool(chat, name)
-	local buf = chat.buf
+	local buf = buf_of(chat)
 	local n = vim.api.nvim_buf_line_count(buf)
 	local last = vim.api.nvim_buf_get_lines(buf, n - 1, n, false)[1] or ""
 	local note = tool_note(name)
@@ -258,11 +318,12 @@ end
 
 ---Amend the last tool note with a summary of the call's input, once known.
 local function amend_tool_note(chat, name, input)
+	local buf = buf_of(chat)
 	local line = chat.tool_line
-	if not line or line > vim.api.nvim_buf_line_count(chat.buf) then
+	if not line or line > vim.api.nvim_buf_line_count(buf) then
 		return
 	end
-	local cur = vim.api.nvim_buf_get_lines(chat.buf, line - 1, line, false)[1]
+	local cur = vim.api.nvim_buf_get_lines(buf, line - 1, line, false)[1]
 	local bare = tool_note(name)
 	-- mark_auto may have got there first: keep its suffix
 	local auto = cur and vim.startswith(cur, bare:sub(1, -2) .. " · auto (") and cur:sub(#bare) or nil
@@ -275,7 +336,7 @@ local function amend_tool_note(chat, name, input)
 		if auto then
 			note = note:sub(1, -2) .. auto
 		end
-		vim.api.nvim_buf_set_lines(chat.buf, line - 1, line, false, { note })
+		vim.api.nvim_buf_set_lines(buf, line - 1, line, false, { note })
 	end
 end
 
@@ -286,20 +347,21 @@ end
 ---@param input table the call's arguments
 ---@param how string "rule" or "classifier"
 function M.mark_auto(name, input, how)
-	local chat = M.current and M.chats[M.current]
-	if not chat or not vim.api.nvim_buf_is_valid(chat.buf) then
+	local chat = M.active()
+	if not chat then
 		return
 	end
+	local buf = buf_of(chat)
 	local full = "mcp__nvim__" .. name
 	local wanted = { tool_note(full, tool_summary(full, input or {})), tool_note(full) }
-	local lines = vim.api.nvim_buf_get_lines(chat.buf, 0, -1, false)
+	local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
 	for i = #lines, 1, -1 do
 		if lines[i] == SEP then
 			return
 		end
 		if lines[i] == wanted[1] or lines[i] == wanted[2] then
 			local marked = lines[i]:sub(1, -2) .. " · auto (" .. how .. ")_"
-			vim.api.nvim_buf_set_lines(chat.buf, i - 1, i, false, { marked })
+			vim.api.nvim_buf_set_lines(buf, i - 1, i, false, { marked })
 			return
 		end
 	end
@@ -307,8 +369,10 @@ end
 
 ---Called by tools.call after an nvim tool finished (for async tools: once the
 ---user answered), so the winbar goes back to "thinking".
-function M.on_tool_done(_)
-	local chat = M.current and M.chats[M.current]
+---@param _ string|nil tool name
+---@param id integer|nil chat id, default the active chat
+function M.on_tool_done(_, id)
+	local chat = (id and M.chats[id]) or M.active()
 	if chat and chat.run then
 		set_winbar(chat, "thinking…")
 	end
@@ -320,21 +384,17 @@ function M.busy()
 	return chat ~= nil and chat.run ~= nil
 end
 
----Send the pending input of a chat buffer.
----@param buf integer|nil chat buffer, defaults to the current buffer
----@param opts { origin_win?: integer }|nil window the request came from
+---Send the pending input of a chat.
+---@param chat HarnerChat
+---@param opts { origin_win?: integer }|nil
 ---@return boolean sent
-function M.send(buf, opts)
+local function send_chat(chat, opts)
 	opts = opts or {}
-	buf = buf or vim.api.nvim_get_current_buf()
-	local chat = M.chats[buf]
-	if not chat then
-		return false
-	end
 	if chat.run then
 		vim.notify("harner: still running, <C-c> to cancel", vim.log.levels.WARN)
 		return false
 	end
+	local buf = buf_of(chat)
 	local sep_idx, lines = last_sep_index(buf)
 	local start = sep_idx and sep_idx or 0 -- lines after the separator (0-based start index)
 	local input = {}
@@ -351,8 +411,11 @@ function M.send(buf, opts)
 	if usable_origin(origin) then
 		chat.origin_win = origin
 	end
-	M.current = buf
+	M.current = chat.id
 	chat.last_prompt = prompt -- context for the auto-mode classifier
+	if not chat.title then
+		chat.title = vim.split(prompt, "\n", { plain = true })[1]:sub(1, 60)
+	end
 
 	local out = { "## You", "" }
 	vim.list_extend(out, vim.split(prompt, "\n", { plain = true }))
@@ -362,41 +425,36 @@ function M.send(buf, opts)
 	scroll_to_end(chat)
 	set_winbar(chat, "thinking…")
 
+	local web = package.loaded["harner.web"]
+	if web then
+		web.ensure() -- the host may have gone away since the last run
+	end
 	local runner = require("harner.runner")
 	chat.run = runner.start({
 		prompt = prompt,
 		session_id = chat.session_id,
 		resume = chat.started,
 		cwd = vim.fn.getcwd(),
+		chat_id = chat.id,
 		on_text = function(text)
-			if vim.api.nvim_buf_is_valid(buf) then
-				append_text(chat, text)
-			end
+			append_text(chat, text)
 		end,
 		on_tool = function(name)
-			if vim.api.nvim_buf_is_valid(buf) then
-				note_tool(chat, name)
-				set_winbar(chat, "running " .. short_name(name))
-			end
+			note_tool(chat, name)
+			set_winbar(chat, "running " .. short_name(name))
 		end,
 		on_tool_input = function(name, input)
-			if vim.api.nvim_buf_is_valid(buf) then
-				amend_tool_note(chat, name, input)
-			end
+			amend_tool_note(chat, name, input)
 		end,
 		on_error = function(msg)
-			if vim.api.nvim_buf_is_valid(buf) then
-				append_lines(chat, { "", "> **error:** " .. msg:gsub("\n", "\n> ") })
-			end
+			append_lines(chat, { "", "> **error:** " .. msg:gsub("\n", "\n> ") })
 		end,
 		on_done = function(result)
 			chat.run = nil
 			chat.started = true
 			chat.tool_line = nil
-			require("harner.tools").cancel_pending("the request finished before the user answered")
-			if not vim.api.nvim_buf_is_valid(buf) then
-				return
-			end
+			require("harner.tools").cancel_chat("the request finished before the user answered", chat.id)
+			buf = buf_of(chat)
 			local n = vim.api.nvim_buf_line_count(buf)
 			local last = vim.api.nvim_buf_get_lines(buf, n - 1, n, false)[1] or ""
 			append_lines(chat, last == "" and { SEP, "" } or { "", SEP, "" })
@@ -408,67 +466,134 @@ function M.send(buf, opts)
 			end
 		end,
 	})
+	-- the winbar update above ran before chat.run was set: mirror running=true
+	if web and chat.run then
+		web.on_meta(chat)
+	end
 	return true
 end
 
-function M.cancel(buf)
-	buf = buf or M.current or vim.api.nvim_get_current_buf()
-	local chat = M.chats[buf]
-	if chat and chat.run then
-		require("harner.tools").cancel_pending("cancelled by the user")
+---Send the pending input of a chat buffer.
+---@param buf integer|nil chat buffer, defaults to the current buffer
+---@param opts { origin_win?: integer }|nil window the request came from
+---@return boolean sent
+function M.send(buf, opts)
+	local chat = M.by_buf(buf or vim.api.nvim_get_current_buf())
+	return chat ~= nil and send_chat(chat, opts)
+end
+
+---@param chat HarnerChat
+local function cancel_chat(chat)
+	if chat.run then
+		require("harner.tools").cancel_chat("cancelled by the user", chat.id)
 		require("harner.runner").cancel(chat.run)
 		append_lines(chat, { "", "> cancelled" })
 	end
 end
 
-local function create_chat()
-	counter = counter + 1
+---Cancel the run of a chat by id (the web UI).
+---@param id integer
+function M.cancel_id(id)
+	local chat = M.chats[id]
+	if chat then
+		cancel_chat(chat)
+	end
+end
+
+---Cancel the run of a chat buffer's chat, or of the current chat. When the
+---current chat is idle (<leader>hx, :HarnerCancel) and exactly one other chat
+---runs (a prompt from the web), that one is cancelled; with several running
+---nothing is guessed.
+---@param buf integer|nil
+function M.cancel(buf)
+	local chat = buf and M.by_buf(buf) or (M.current and M.chats[M.current])
+	if not buf and not (chat and chat.run) then
+		local running = vim.tbl_filter(function(c)
+			return c.run ~= nil
+		end, M.list())
+		if #running > 1 then
+			vim.notify("harner: several chats are running; pick one with :HarnerChats first", vim.log.levels.WARN)
+			return
+		end
+		chat = running[1] or chat
+	end
+	if chat then
+		cancel_chat(chat)
+	end
+end
+
+---Keep the transcript when the chat's buffer is unloaded or wiped. The
+---buffer itself is wiped later (not allowed inside its own autocmd) so a
+---rebuilt one can take its name.
+local function detach(chat, buf)
+	if chat.buf ~= buf then
+		return
+	end
+	chat.lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+	chat.buf = nil
+	chat.stale_buf = buf
+	vim.schedule(function()
+		if vim.api.nvim_buf_is_valid(buf) then
+			pcall(vim.api.nvim_buf_delete, buf, { force = true })
+		end
+	end)
+end
+
+---Create the chat's view buffer from its kept lines.
+---@param chat HarnerChat
+attach_buf = function(chat)
+	if chat.stale_buf and vim.api.nvim_buf_is_valid(chat.stale_buf) then
+		pcall(vim.api.nvim_buf_delete, chat.stale_buf, { force = true })
+	end
+	chat.stale_buf = nil
 	local buf = vim.api.nvim_create_buf(false, true)
-	vim.api.nvim_buf_set_name(buf, "harner://chat/" .. counter)
+	pcall(vim.api.nvim_buf_set_name, buf, "harner://chat/" .. chat.id)
 	vim.bo[buf].buftype = "nofile"
 	vim.bo[buf].bufhidden = "hide"
 	vim.bo[buf].swapfile = false
 	vim.bo[buf].filetype = "markdown"
-	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "" })
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, chat.lines or { "" })
+	chat.lines = nil
+	chat.buf = buf
 
+	local map = function(mode, lhs, rhs, desc)
+		vim.keymap.set(mode, lhs, rhs, { buffer = buf, desc = desc, nowait = true })
+	end
+	local function send()
+		send_chat(chat)
+	end
+	local function cancel()
+		cancel_chat(chat)
+	end
+	map("n", "<CR>", send, "harner: send")
+	map("i", "<C-s>", send, "harner: send")
+	map("n", "<C-c>", cancel, "harner: cancel")
+	map("i", "<C-c>", cancel, "harner: cancel")
+
+	vim.api.nvim_create_autocmd({ "BufUnload", "BufWipeout" }, {
+		buffer = buf,
+		callback = function()
+			detach(chat, buf)
+		end,
+	})
+	local web = package.loaded["harner.web"]
+	if web then
+		web.on_buf(chat)
+	end
+end
+
+local function create_chat()
+	counter = counter + 1
 	local chat = {
-		buf = buf,
+		id = counter,
 		session_id = uuid(),
 		started = false,
 		run = nil,
 		origin_win = nil,
 		auto = require("harner").config.auto.enabled == true,
 	}
-	M.chats[buf] = chat
-
-	local map = function(mode, lhs, rhs, desc)
-		vim.keymap.set(mode, lhs, rhs, { buffer = buf, desc = desc, nowait = true })
-	end
-	map("n", "<CR>", function()
-		M.send(buf)
-	end, "harner: send")
-	map("i", "<C-s>", function()
-		M.send(buf)
-	end, "harner: send")
-	map("n", "<C-c>", function()
-		M.cancel(buf)
-	end, "harner: cancel")
-	map("i", "<C-c>", function()
-		M.cancel(buf)
-	end, "harner: cancel")
-
-	vim.api.nvim_create_autocmd("BufWipeout", {
-		buffer = buf,
-		callback = function()
-			if chat.run then
-				require("harner.runner").cancel(chat.run)
-			end
-			M.chats[buf] = nil
-			if M.current == buf then
-				M.current = nil
-			end
-		end,
-	})
+	M.chats[chat.id] = chat
+	attach_buf(chat)
 	return chat
 end
 
@@ -478,7 +603,7 @@ function M.ensure()
 	local chat = M.current and M.chats[M.current]
 	if not chat then
 		chat = create_chat()
-		M.current = chat.buf
+		M.current = chat.id
 	end
 	return chat
 end
@@ -490,11 +615,13 @@ local function open_win(chat, focus)
 	if focus == nil then
 		focus = true
 	end
+	local buf = buf_of(chat)
 	local existing = chat_win(chat)
 	if existing then
 		if focus then
 			vim.api.nvim_set_current_win(existing)
 		end
+		M.current = chat.id
 		return existing
 	end
 	local origin = vim.api.nvim_get_current_win()
@@ -507,7 +634,7 @@ local function open_win(chat, focus)
 	end
 	vim.cmd("botright vsplit")
 	local win = vim.api.nvim_get_current_win()
-	vim.api.nvim_win_set_buf(win, chat.buf)
+	vim.api.nvim_win_set_buf(win, buf)
 	vim.api.nvim_win_set_width(win, width)
 	vim.wo[win].wrap = true
 	vim.wo[win].linebreak = true
@@ -515,11 +642,29 @@ local function open_win(chat, focus)
 	vim.wo[win].relativenumber = false
 	vim.wo[win].signcolumn = "no"
 	vim.wo[win].winfixwidth = true
-	set_winbar(chat, chat.run and "thinking…" or "idle")
-	vim.api.nvim_win_set_cursor(win, { vim.api.nvim_buf_line_count(chat.buf), 0 })
-	M.current = chat.buf
+	M.refresh_winbar(chat)
+	vim.api.nvim_win_set_cursor(win, { vim.api.nvim_buf_line_count(buf), 0 })
+	M.current = chat.id
 	if not focus and vim.api.nvim_win_is_valid(origin) then
 		vim.api.nvim_set_current_win(origin)
+	end
+	return win
+end
+
+---Make `chat` current and show it: in the window already showing a chat,
+---else in a new split.
+---@param chat HarnerChat
+---@param focus boolean|nil default true
+local function show(chat, focus)
+	local win = chat_win(chat) or any_chat_win()
+	if not win then
+		return open_win(chat, focus)
+	end
+	vim.api.nvim_win_set_buf(win, buf_of(chat))
+	M.current = chat.id
+	M.refresh_winbar(chat)
+	if focus ~= false then
+		vim.api.nvim_set_current_win(win)
 	end
 	return win
 end
@@ -530,45 +675,47 @@ function M.open()
 	vim.cmd("startinsert!")
 end
 
----Send `prompt` to the current chat without typing into the chat buffer.
----Used by the input popup and :HarnerAsk. Replaces any draft below the
----separator. Opens the chat window (unfocused) if it is hidden so the answer
----is visible.
+---Send `prompt` to the current chat (or chat `id`) without typing into the
+---chat buffer. Used by the input popup, :HarnerAsk and the web UI. Replaces
+---any draft below the separator. Opens the chat window (unfocused) if it is
+---hidden so the answer is visible.
 ---@param prompt string
 ---@param origin_win integer|nil window the question is about
+---@param id integer|nil chat id, default the current chat
 ---@return boolean sent
-function M.ask(prompt, origin_win)
+function M.ask(prompt, origin_win, id)
 	prompt = vim.trim(prompt or "")
 	if prompt == "" then
 		return false
 	end
-	local chat = M.ensure()
+	local chat = id and M.chats[id] or M.ensure()
 	if chat.run then
 		vim.notify("harner: still running, <leader>hx to cancel", vim.log.levels.WARN)
 		return false
 	end
-	local sep_idx = last_sep_index(chat.buf)
-	vim.api.nvim_buf_set_lines(chat.buf, sep_idx or 0, -1, false, vim.split(prompt, "\n", { plain = true }))
-	if require("harner").config.prompt.open_chat then
+	local buf = buf_of(chat)
+	local sep_idx = last_sep_index(buf)
+	vim.api.nvim_buf_set_lines(buf, sep_idx or 0, -1, false, vim.split(prompt, "\n", { plain = true }))
+	origin_win = origin_win or vim.api.nvim_get_current_win()
+	-- a prompt for another chat (the web UI) while a chat is on screen runs in
+	-- the background: no second split, the current chat stays current
+	local background = id ~= nil and id ~= M.current and any_chat_win() ~= nil
+	if require("harner").config.prompt.open_chat and not background then
 		open_win(chat, false)
 	end
-	return M.send(chat.buf, { origin_win = origin_win or vim.api.nvim_get_current_win() })
+	local prev = M.current
+	local sent = send_chat(chat, { origin_win = origin_win })
+	if background then
+		M.current = prev
+	end
+	return sent
 end
 
----Start a fresh chat buffer with a new session.
+---Start a fresh chat with a new session; the old ones stay (`:HarnerChats`).
 function M.new()
 	local chat = create_chat()
-	local old = M.current and M.chats[M.current]
-	local win = old and chat_win(old)
-	if win then
-		vim.api.nvim_set_current_win(win)
-		vim.api.nvim_win_set_buf(win, chat.buf)
-		M.current = chat.buf
-		set_winbar(chat, "idle")
-	else
-		M.current = chat.buf
-		open_win(chat)
-	end
+	show(chat, true)
+	set_winbar(chat, "idle")
 	vim.cmd("startinsert!")
 end
 
@@ -582,5 +729,44 @@ function M.toggle()
 		M.open()
 	end
 end
+
+---Chats sorted by id, for the picker and the web mirror.
+---@return HarnerChat[]
+function M.list()
+	local out = vim.tbl_values(M.chats)
+	table.sort(out, function(a, b)
+		return a.id < b.id
+	end)
+	return out
+end
+
+---One line per chat for the picker.
+---@param chat HarnerChat
+function M.label(chat)
+	local state = chat.run and (chat.state or "thinking…") or "idle"
+	return string.format(
+		"#%d%s  %s  [%s]",
+		chat.id,
+		chat.id == M.current and "*" or "",
+		chat.title or "(empty)",
+		state
+	)
+end
+
+---Pick a chat and show it (`:HarnerChats`).
+function M.pick()
+	local items = M.list()
+	if #items == 0 then
+		vim.notify("harner: no chats yet")
+		return
+	end
+	vim.ui.select(items, { prompt = "harner chats", format_item = M.label }, function(chat)
+		if chat and M.chats[chat.id] then
+			show(chat, true)
+		end
+	end)
+end
+
+M.show = show
 
 return M

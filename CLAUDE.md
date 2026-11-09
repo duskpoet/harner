@@ -11,13 +11,15 @@ lazy.nvim's checkout at `~/.local/share/nvim/lazy/harner/`. The spec in
 opts = {} }`; without `opts` lazy never calls `setup()` and no commands or
 keys exist.
 
-One chat session per nvim instance, reachable from any window:
+Any number of chats per nvim instance (each its own Claude session, runs may
+overlap), kept until nvim exits, reachable from any window:
 
 | key          | action                                                     |
 | ------------ | ---------------------------------------------------------- |
 | `<leader>hh` | input popup for the current chat (`prompt.lua`); in visual mode it attaches a *reference* to the selection |
 | `<leader>ht` | toggle the chat split                                      |
-| `<leader>hn` | new chat (fresh Claude session)                            |
+| `<leader>hn` | new chat (fresh Claude session; the old one is kept)       |
+| `<leader>hl` | pick a chat to show (`:HarnerChats`)                       |
 | `<leader>hx` | cancel the running request                                 |
 | `<leader>ha` | toggle auto mode for the current chat (`:HarnerAuto`)      |
 
@@ -51,11 +53,27 @@ chat.lua ──send──▶ runner.lua ──vim.system──▶ claude -p --ou
 All modules live in `lua/harner/`:
 
 - `init.lua` — `M.config` defaults, `setup()` (commands `:Harner`, `:HarnerNew`,
-  `:HarnerCancel`, `:HarnerAsk`, the `config.keys` keymaps, which-key group).
+  `:HarnerCancel`, `:HarnerAsk`, `:HarnerChats`, `:HarnerWeb`, the
+  `config.keys` keymaps, which-key group; starts `web.lua` when
+  `web.enabled`).
 - `chat.lua` — chat buffer/window. Everything below the last separator line
   (`string.rep("─", 40)`) is pending input. One Claude session per buffer:
   first send uses `--session-id <uuid>`, later sends `--resume <uuid>`.
-  `M.current` is the active chat; `ensure()` creates it lazily, `ask(prompt,
+  `M.chats` is keyed by a chat id (not the buffer): a chat outlives its
+  buffer. `BufUnload`/`BufWipeout` only `detach()` (lines kept in
+  `chat.lines`, the old buffer wiped on the next tick), and `buf_of(chat)`
+  rebuilds `harner://chat/<id>` on the next write or show, so a run keeps
+  streaming into a wiped chat. `by_buf(buf)` maps back. `pick()` /
+  `show()` swap a chat into the existing chat window.
+  `M.current` is the chat id the popup/keys use; `M.ctx` is the chat a tool
+  call runs for (set by `tools.call` via `in_chat`), and `active()` returns
+  ctx-or-current: `target_win`, grants, `auto.enabled`, `mark_auto` all go
+  through it. The runner puts `HARNER_CHAT=<id>` in the bridge env, the
+  bridge passes it as `tools.call`'s third arg, `owner[id]` remembers it per
+  pending call and `tools.cancel_chat(reason, id)` cancels only that chat's
+  calls (run end / cancel); confirm answers and classifier verdicts are
+  wrapped in `in_chat` so they act for the right chat later.
+  `ensure()` creates the current chat lazily, `ask(prompt,
   origin_win)` writes the prompt below the separator, opens the split
   unfocused (`config.prompt.open_chat`) and calls `send()`. `send()` returns
   false when nothing was sent (empty input or a run in flight).
@@ -117,7 +135,10 @@ All modules live in `lua/harner/`:
   (`edit_file` uses `s` save / `d` drop). Grants live on the chat
   (`chat.grants`), so `<leader>hn` asks again. `ask()` returns the float's
   close function; `tools.lua` opens confirms through its local `ask()`, which
-  files them under the running call's id (`asking[id]`), and
+  files them under the running call's id (`asking[id]`) and queues them
+  (`open_queued`: one float at a time, since a second float would decline
+  the first on WinLeave when runs of two chats overlap; a queued entry's
+  close works before it opens), and
   `cancel_pending()` declines them after marking the calls cancelled (one id
   on a bridge timeout, all on cancel / run end), so nothing runs or writes
   after a call ended.
@@ -156,6 +177,53 @@ All modules live in `lua/harner/`:
   `chat.mark_auto(tool, args, "rule"|"classifier")`, which finds the call's
   note above the last separator; `amend_tool_note` keeps the suffix if the
   mark came first. edit_file's save/drop question is never automated.
+- `host.lua` — the web host, one per user, run detached as `nvim -l
+  host.lua '<json>'` (`socket`, `idle`, `log` = `stdpath("log")/harner-host.log`,
+  `http = {host, port, token_file, static}`; `serve_http`
+  dofiles `http.lua`, a bind failure only sets `M.info.error`, which every
+  nvim gets as `info` on hello).
+  Unix socket, NDJSON both ways (protocol in the file header). nvims send
+  `hello`/`chat`/`lines`/`pending`/`resolved`; watchers send `watch` (get a
+  `snapshot`, then every nvim message tagged `nvim = <id>`, `gone`, `error`)
+  and `answer`/`prompt`/`cancel`, which `M.answer`/`M.prompt`/`M.cancel`
+  check (live nvim, question still open) and forward. `M.sinks` is the hook
+  for the HTTP server's SSE. Chats of an exited nvim stay as read-only
+  snapshots; `idle_exit` s after the last nvim left it unlinks the socket
+  and exits. A live socket on start means another host: exit; a dead one is
+  unlinked. Only uv/json in callbacks, no nvim API.
+- `http.lua` — the host's HTTP/1.1 server (uv TCP, no nvim API), one
+  request per connection except `GET /events` (SSE: `snapshot`, then every
+  broadcast via `host.sinks`, `: ping` every 20 s). No Host header check
+  (dropped deliberately: the token is the gate, and its cookie is bound to
+  the name signed in under, so a DNS-rebinding name carries none). `?token=`
+  on `GET /` → 303 + `harner_token` cookie (HttpOnly, SameSite=Strict), else
+  the cookie (constant-time compare). POST `/api/{answer,prompt,cancel}`
+  also needs `Origin == http://<Host>` and `Content-Type: application/json`;
+  bodies ≤ 1 MB, no chunked. Static files only from the `STATIC` table
+  (`web/index.html`, `app.js`, `app.css`, `marked.umd.js`). Every response
+  carries the CSP (`script-src 'self'`, no inline anything), nosniff, DENY
+  framing, no-store. `web/marked.umd.js` is vendored marked 18.1.3 (MIT,
+  `web/marked.LICENSE`, npm tarball checked against the registry's
+  sha512); `app.js` overrides its `html`/`link`/`image` renderers (raw HTML
+  escaped, links http(s)/mailto only, images as alt text) and sets all other
+  server text with `textContent`. Pending cards are kept by key so a
+  half-typed answer survives unrelated updates.
+- `web.lua` — nvim side, loaded only with `web.enabled` (chat.lua/tools.lua
+  call it via `package.loaded`, so off costs nothing). `start(done)`
+  connects to `socket_path()` (`$XDG_RUNTIME_DIR/harner/host.sock`, else
+  `/tmp/harner-<uid>/`, dir 0700), `uv.spawn`s the host (`detached`, no
+  stdio, `unref`) on the first failed connect and retries every 100 ms;
+  `ensure()` before each run reconnects after the host went away; `resync()`
+  resends hello, every chat and open question. `on_buf` (from
+  `chat.attach_buf`) sends the whole transcript and follows it with
+  `nvim_buf_attach` deltas; `on_meta` from `set_winbar`. tools' `ask`
+  wrapper registers each float with `on_pending(cid, opts, close)` and
+  `on_resolved`; `apply_answer` validates the host's answer against the
+  question's keys/items/input before calling `close`, with `M.answering` set
+  so the decision log gets `via = "web"`. `token()` creates the 48-hex token
+  (`uv.random`, 0600) the host reads; `url()` / `show_url()` (`:HarnerWeb`)
+  build the sign-in URL from the host's `info`. Tests must set `port` and
+  `token_file` (else they touch the real state dir and port 7337).
 - `decisions.lua` — JSONL decision log (`config.decisions.path`, default
   `stdpath("state")/harner/decisions.jsonl`; tests/helper.lua points it at a
   temp file). `auto_or_confirm`'s marks log `rule`/`classifier`; confirms
@@ -166,8 +234,8 @@ All modules live in `lua/harner/`:
 - `tools.lua` — `M.tools[name] = {description, inputSchema, handler, async?}`.
   `list()` and `call(name, args)` are what the bridge invokes. Sync handlers
   return a string; errors become `isError = true` results. Async handlers
-  (`async = true`) get `handler(args, resolve)` and run `vim.ui.select` /
-  `vim.ui.input`; `call` returns `{ pending = id }`, `resolve(text, is_error)`
+  (`async = true`) get `handler(args, resolve)` and open a `confirm.lua`
+  float; `call` returns `{ pending = id }`, `resolve(text, is_error)`
   stores the result for `poll(id)`. A handler that resolves before returning
   (nothing to ask) gets its result returned directly, no polling. `cancel_pending(reason, [id])` resolves
   waiting calls with an error (chat cancel and run end both call it).
@@ -329,9 +397,11 @@ except the paths `auto.writes_blocker` flags).
   prompt to a one-line title, so confirms and ask_user choices use
   `confirm.lua` instead (`items`: numbered list under the question, `1`-`9`
   or `<CR>` on a line picks, `cb("item", index)` so a choice named "no" is
-  not a decline); `vim.ui.input` is the default
-  `input()` cmdline prompt, which blocks the calling `nvim_exec_lua` until
-  the user answers (functionally fine, the bridge just waits).
+  not a decline). Free-text ask_user uses `confirm.input()` (question above a
+  rule, answer typed below it, `<CR>` normal / `<C-s>` send, `q`/`<Esc>`/
+  `<C-c>` dismiss, `cb("text", answer)`), not `vim.ui.input`: the default
+  `input()` cmdline prompt blocks the main loop, so neither a cancel nor the
+  web UI could answer it. The `ask` wrapper in tools picks it via `opts.input`.
 - To exercise flows with the main loop running (plugins, Telescope, NERDTree),
   start `nvim --headless --listen <sock> --cmd "set columns=155 lines=45"`
   with the real config and drive it from `nvim -l` over `sockconnect` with
@@ -356,6 +426,20 @@ float with `feedkeys(..., "x")`:
 # whitespace fallbacks / ambiguous / missing / replace_all), write_file
 # (confirmed / declined / create_dirs), save_file, cancel path (fast, offline)
 nvim --headless -u NONE -l tests/bridge_test.lua
+
+# several chats: survive :bwipeout/:bdelete (also mid-run), picker, tool
+# calls routed by chat id (window, grants, cancel_chat)
+nvim --headless -u NONE -l tests/chats_test.lua
+
+# web host: spawn on demand (real detached process), transcript mirror,
+# answers from the watcher / nvim (first wins), prompt + cancel from the
+# watcher, snapshot of an exited nvim, idle exit, respawn + resync (~10 s)
+nvim --headless -u NONE -l tests/host_test.lua
+
+# web server with raw HTTP: token -> cookie (any Host), CSP, static list,
+# POST guards (Origin / content type / size / cookie), prompt + answer APIs,
+# SSE snapshot and live events, busy port reported via :HarnerWeb's url()
+nvim --headless -u NONE -l tests/web_test.lua
 
 # popup + <leader>h keymaps, offline; the only test that stubs the runner
 nvim --headless -u NONE -l tests/prompt_test.lua

@@ -74,14 +74,19 @@ end
 ---Write the MCP config JSON (nvim plus `config.mcp_servers`) and return its
 ---path. The file may hold API keys, so it is created 0600; the runner deletes
 ---it when the run ends. Errors when a user server is named `nvim`.
+---@param chat_id integer|nil the chat the run belongs to (HARNER_CHAT for the bridge)
 ---@return string path
-function M.write_config()
+function M.write_config(chat_id)
+	local env = { HARNER_NVIM = M.server_address() }
+	if chat_id then
+		env.HARNER_CHAT = tostring(chat_id)
+	end
 	local servers = {
 		nvim = {
 			type = "stdio",
 			command = vim.v.progpath,
 			args = { "-l", bridge_path },
-			env = { HARNER_NVIM = M.server_address() },
+			env = env,
 			-- exempt from ToolSearch deferral: the editor tools are used every turn
 			alwaysLoad = true,
 		},

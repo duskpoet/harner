@@ -19,6 +19,9 @@ if not addr or addr == "" then
 	os.exit(1)
 end
 
+-- the chat this run belongs to: tools act on its window, grants and auto flag
+local chat_id = tonumber(os.getenv("HARNER_CHAT") or "")
+
 local ok, chan = pcall(vim.fn.sockconnect, "pipe", addr, { rpc = true })
 if not ok or chan == 0 then
 	log("cannot connect to nvim at " .. addr .. ": " .. tostring(chan))
@@ -89,7 +92,7 @@ end
 handlers["tools/call"] = function(params)
 	local name = params and params.name
 	local args = (params and params.arguments) or vim.empty_dict()
-	local ok2, res = pcall(nvim_call, "return require('harner.tools').call(...)", { name, args })
+	local ok2, res = pcall(nvim_call, "return require('harner.tools').call(...)", { name, args, chat_id or vim.NIL })
 	if not ok2 then
 		return error_result("nvim rpc error: " .. tostring(res))
 	end

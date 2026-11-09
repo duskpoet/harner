@@ -6,7 +6,7 @@ local M = {}
 ---@field proc vim.SystemObj|nil
 ---@field session_id string
 
----@param opts {prompt:string, session_id:string, resume:boolean, cwd:string,
+---@param opts {prompt:string, session_id:string, resume:boolean, cwd:string, chat_id:integer|nil,
 ---  on_text:fun(text:string), on_tool:fun(name:string), on_done:fun(result:table|nil),
 ---  on_error:fun(msg:string), on_tool_input:fun(name:string, input:table)|nil}
 ---@return HarnerRun
@@ -38,7 +38,7 @@ function M.start(opts)
 		end
 	end
 
-	local ok, mcp_path = pcall(mcp.write_config)
+	local ok, mcp_path = pcall(mcp.write_config, opts.chat_id)
 	if not ok then
 		return fail(tostring(mcp_path))
 	end

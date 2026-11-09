@@ -5,8 +5,8 @@ vim.cmd("edit " .. vim.fn.fnameescape(root .. "/lua/harner/mcp.lua"))
 vim.api.nvim_win_set_cursor(0, { 12, 0 })
 local chat = require("harner.chat")
 chat.open()
-local buf = chat.current
-local c = chat.chats[buf]
+local c = chat.chats[chat.current]
+local buf = c.buf
 local function ask(text)
   local n = vim.api.nvim_buf_line_count(buf)
   vim.api.nvim_buf_set_lines(buf, n - 1, n, false, { text })

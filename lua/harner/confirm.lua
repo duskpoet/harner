@@ -31,6 +31,21 @@ vim.api.nvim_create_autocmd("ColorScheme", {
 	callback = set_highlights,
 })
 
+---Answer keys a confirm offers besides `n` (decline) and the item digits:
+---y (yes), a (always), then `opts.choices`. Shared with the web mirror.
+---@param opts HarnerConfirmOpts
+---@return {key:string, label:string, value:string}[]
+function M.keys(opts)
+	local keys = {}
+	if opts.yes then
+		keys[#keys + 1] = { key = "y", label = opts.yes, value = "yes" }
+	end
+	if opts.always then
+		keys[#keys + 1] = { key = "a", label = opts.always, value = "always" }
+	end
+	return vim.list_extend(keys, opts.choices or {})
+end
+
 ---@class HarnerConfirmOpts
 ---@field title string short question, shown on the border
 ---@field body string[] what is being approved (full text, wrapped)
@@ -69,14 +84,7 @@ function M.ask(opts, cb)
 		vim.bo[buf].filetype = opts.filetype
 	end
 
-	local choices = {}
-	if opts.yes then
-		choices[#choices + 1] = { key = "y", label = opts.yes, value = "yes" }
-	end
-	if opts.always then
-		choices[#choices + 1] = { key = "a", label = opts.always, value = "always" }
-	end
-	vim.list_extend(choices, opts.choices or {})
+	local choices = M.keys(opts)
 	-- Footer as highlighted chunks: keys stand out from their labels.
 	local footer = { { " ", "HarnerConfirmFooter" } }
 	local function add_key(key, label)
@@ -182,6 +190,122 @@ function M.ask(opts, cb)
 	for _, lhs in ipairs({ "n", "q", "<Esc>", "<C-c>" }) do
 		map(lhs, "no")
 	end
+	vim.api.nvim_create_autocmd("WinLeave", {
+		buffer = buf,
+		once = true,
+		callback = function()
+			vim.schedule(function()
+				close("no")
+			end)
+		end,
+	})
+	return close
+end
+
+local RULE = string.rep("─", 20)
+
+---Free-text question (ask_user without choices). Unlike vim.ui.input, whose
+---default frontend is a blocking cmdline prompt, this float leaves the main
+---loop free, so the call can also be answered or cancelled from elsewhere.
+---The question sits above a rule; the answer is everything typed below it.
+---`cb` gets "text" plus the answer, or "no", exactly once. Keys: <CR> in
+---normal mode or <C-s> sends, q / <Esc> (normal) / <C-c> dismiss, and so
+---does leaving the float.
+---@param opts { title: string, body: string[] }
+---@param cb fun(choice:string, text:string|nil)
+---@return fun(choice:string, text:string|nil) close
+function M.input(opts, cb)
+	local prev = vim.api.nvim_get_current_win()
+	local buf = vim.api.nvim_create_buf(false, true)
+	vim.bo[buf].bufhidden = "wipe"
+	vim.bo[buf].filetype = "markdown"
+	local lines = vim.list_extend({}, opts.body)
+	vim.list_extend(lines, { RULE, "" })
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+
+	local footer = {
+		{ " ", "HarnerConfirmFooter" },
+		{ "<CR>", "HarnerConfirmKey" },
+		{ "/", "HarnerConfirmFooter" },
+		{ "<C-s>", "HarnerConfirmKey" },
+		{ " send · ", "HarnerConfirmFooter" },
+		{ "q", "HarnerConfirmKey" },
+		{ " skip ", "HarnerConfirmFooter" },
+	}
+	local longest = vim.fn.strdisplaywidth(opts.title) + 4
+	for _, l in ipairs(opts.body) do
+		longest = math.max(longest, vim.fn.strdisplaywidth(l) + 2)
+	end
+	local width = math.max(50, math.min(longest, vim.o.columns - 8))
+	local win = vim.api.nvim_open_win(buf, true, {
+		relative = "editor",
+		row = math.floor(vim.o.lines * 0.3),
+		col = math.floor((vim.o.columns - width) / 2),
+		width = width,
+		height = 1,
+		style = "minimal",
+		border = "rounded",
+		title = { { " " .. opts.title .. " ", "HarnerConfirmTitle" } },
+		title_pos = "center",
+		footer = footer,
+		footer_pos = "center",
+		zindex = 60,
+	})
+	vim.wo[win].winhighlight = "NormalFloat:HarnerConfirmNormal,FloatBorder:HarnerConfirmBorder"
+	vim.wo[win].wrap = true
+	vim.wo[win].linebreak = true
+	local function fit()
+		if vim.api.nvim_win_is_valid(win) then
+			local h = vim.api.nvim_win_text_height(win, {}).all
+			vim.api.nvim_win_set_height(win, math.max(1, math.min(h, vim.o.lines - 8)))
+		end
+	end
+	fit()
+	vim.api.nvim_win_set_cursor(win, { #lines, 0 })
+	vim.cmd("startinsert")
+
+	local function answer()
+		local all = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+		for i = #all, 1, -1 do
+			if all[i] == RULE then
+				return vim.trim(table.concat(all, "\n", i + 1))
+			end
+		end
+		return vim.trim(table.concat(all, "\n"))
+	end
+
+	local done = false
+	local function close(choice, text)
+		if done then
+			return
+		end
+		done = true
+		if vim.api.nvim_win_is_valid(win) then
+			if vim.api.nvim_get_current_win() == win then
+				vim.cmd("stopinsert")
+			end
+			vim.api.nvim_win_close(win, true)
+		end
+		if vim.api.nvim_win_is_valid(prev) and vim.api.nvim_get_current_win() ~= prev then
+			pcall(vim.api.nvim_set_current_win, prev)
+		end
+		cb(choice, text)
+	end
+	local function send()
+		close("text", answer())
+	end
+	local o = { buffer = buf, nowait = true }
+	vim.keymap.set("n", "<CR>", send, o)
+	vim.keymap.set({ "n", "i" }, "<C-s>", send, o)
+	for _, lhs in ipairs({ "q", "<Esc>" }) do
+		vim.keymap.set("n", lhs, function()
+			close("no")
+		end, o)
+	end
+	vim.keymap.set({ "n", "i" }, "<C-c>", function()
+		close("no")
+	end, o)
+	vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, { buffer = buf, callback = fit })
 	vim.api.nvim_create_autocmd("WinLeave", {
 		buffer = buf,
 		once = true,

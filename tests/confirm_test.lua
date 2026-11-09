@@ -60,6 +60,22 @@ keys("q")
 local res_q = tools.poll(r.pending)
 check(res_q.isError and text(res_q):find("dismissed", 1, true), "q dismisses the question")
 
+-- ask_user without choices: free-text float, answer typed below the rule
+r = tools.call("ask_user", { question = "Which branch?\nThe default is main." })
+fw = floats()[1]
+check(fw ~= nil and vim.api.nvim_get_current_win() == fw, "free-text float opened and has focus")
+local ibuf = fw and vim.api.nvim_win_get_buf(fw)
+flines = ibuf and vim.api.nvim_buf_get_lines(ibuf, 0, -1, false) or {}
+check(flines[1] == "Which branch?" and flines[2] == "The default is main." and #flines == 4, "question above the rule: " .. vim.inspect(flines))
+check(vim.api.nvim_win_get_cursor(fw)[1] == 4, "cursor on the answer line")
+vim.api.nvim_buf_set_lines(ibuf, 3, 4, false, { "feature/x", "  (rebased)" })
+keys("<CR>")
+check(text(tools.poll(r.pending)) == "feature/x\n  (rebased)" and #floats() == 0, "<CR> sends the typed lines")
+r = tools.call("ask_user", { question = "Anything?" })
+keys("q")
+res_q = tools.poll(r.pending)
+check(res_q.isError and text(res_q):find("dismissed", 1, true), "q dismisses the free-text question")
+
 -- 2. run_command: `a` grants exactly that command for the chat
 local r = call("run_command", { cmd = "echo 'granted'" }, "a")
 check(text(r) == "granted" and not r.isError, "run_command approved with a: " .. tostring(text(r)))
@@ -184,6 +200,35 @@ local mine_buf = vim.api.nvim_get_current_buf()
 vim.api.nvim_buf_set_lines(mine_buf, 0, 0, false, { "-- user note" })
 check(not edit(2).isError and normal_wins() == 2, "after the user changed a.lua, the next file gets a split")
 check(vim.fn.bufwinnr(mine_buf) > 0, "a.lua with the user's change stays visible")
+
+-- 8. overlapping questions queue: a second float would decline the first on WinLeave
+local q1 = tools.call("ask_user", { question = "first?", choices = { "x", "y" } })
+local q2 = tools.call("ask_user", { question = "second?", choices = { "x", "y" } })
+check(q1.pending and q2.pending and #floats() == 1, "the second question waits, one float")
+check(tools.poll(q1.pending) == nil or tools.poll(q1.pending) == vim.NIL, "the first is still open")
+keys("1")
+check(text(tools.poll(q1.pending)) == "x", "first answered")
+check(#floats() == 1, "the second opens once the first closed")
+keys("2")
+check(text(tools.poll(q2.pending)) == "y" and #floats() == 0, "second answered")
+local q3 = tools.call("ask_user", { question = "third?", choices = { "x" } })
+local q4 = tools.call("ask_user", { question = "fourth?", choices = { "x" } })
+tools.cancel_pending("gone", q4.pending)
+check(tools.poll(q4.pending).isError and #floats() == 1, "a queued question can be cancelled")
+keys("n")
+check(tools.poll(q3.pending).isError and #floats() == 0, "nothing left in the queue")
+-- a float that fails to open is declined and does not block the queue
+local real_ask = confirm.ask
+confirm.ask = function() error("no room") end
+local notify = vim.notify
+vim.notify = function() end
+local bad = tools.call("ask_user", { question = "broken?", choices = { "x" } })
+confirm.ask, vim.notify = real_ask, notify
+local q5 = tools.call("ask_user", { question = "after?", choices = { "x" } })
+check(((bad.pending and tools.poll(bad.pending)) or bad).isError, "failed float declined")
+check(q5.pending and #floats() == 1, "the next question still opens")
+keys("1")
+check(text(tools.poll(q5.pending)) == "x", "and can be answered")
 
 vim.fn.delete(tmp, "rf")
 t.finish()

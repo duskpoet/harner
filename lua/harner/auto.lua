@@ -18,11 +18,10 @@ local function cfg()
 end
 
 local function current_chat()
-	local chat = require("harner.chat")
-	return chat.current and chat.chats[chat.current]
+	return require("harner.chat").active()
 end
 
----True when the current chat runs in auto mode.
+---True when the chat of the running tool call (else the current one) runs in auto mode.
 function M.enabled()
 	local c = current_chat()
 	if c then

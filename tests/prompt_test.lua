@@ -83,7 +83,8 @@ check(not vim.api.nvim_win_is_valid(p2), "WinLeave closed popup")
 -- new chat from the editor
 vim.api.nvim_set_current_win(edit_win)
 keys("<leader>hn")
-check(chat.current ~= c.buf, "<leader>hn created a new chat")
+check(chat.current ~= c.id, "<leader>hn created a new chat")
+check(chat.chats[c.id] ~= nil, "the old chat is kept")
 vim.api.nvim_set_current_win(edit_win)
 
 -- visual selection: popup carries a reference, Claude reads the text via get_selection

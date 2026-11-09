@@ -3,8 +3,8 @@ local root, check = t.root, t.check
 -- Bridge round-trip test: initialize, tools/list, every tool category
 -- (display, open_file, edit_file / write_file / save_file, async ask_user /
 -- run_command), error paths. Offline.
--- vim.ui.select / vim.ui.input are stubbed and answer after a short delay so
--- the async path really goes through the bridge's poll loop.
+-- confirm.ask / confirm.input (and vim.ui.select) are stubbed and answer after
+-- a short delay so the async path really goes through the bridge's poll loop.
 require("harner").setup({ show_text = { mode = "split" }, auto = { enabled = false }, write_file = { confirm = true } })
 local mcp = require("harner.mcp")
 local addr = mcp.server_address()
@@ -46,9 +46,11 @@ for _, name in ipairs({ "open_file", "edit_file" }) do
     return res
   end
 end
-vim.ui.input = function(opts, cb)
-  ui_prompts[#ui_prompts + 1] = opts.prompt
-  vim.defer_fn(function() cb("typed answer") end, 150)
+-- ask_user without choices: the free-text float
+local real_confirm_input = confirm.input
+confirm.input = function(opts, cb)
+  ui_prompts[#ui_prompts + 1] = opts.title .. " " .. table.concat(opts.body, " ")
+  vim.defer_fn(function() cb("text", "typed answer") end, 150)
 end
 
 -- fixtures for edit_file / write_file / save_file
@@ -189,10 +191,16 @@ check(#write_prompts == 4 and #save_prompts == 1, "confirm asked for 4 writes an
 vim.fn.delete(tmp, "rf")
 
 -- cancel path: a pending ask resolves with an error and poll hands it over
-vim.ui.input = function() end -- never answers
+-- (the real free-text float this time: nobody answers it)
+confirm.input = real_confirm_input
+local function floats()
+  return #vim.tbl_filter(function(w) return vim.api.nvim_win_get_config(w).relative ~= "" end, vim.api.nvim_list_wins())
+end
 local res = tools.call("ask_user", { question = "stuck?" })
 check(type(res) == "table" and res.pending ~= nil and tools.poll(res.pending) == nil, "async call is pending")
+check(floats() == 1, "free-text ask_user opens a float")
 tools.cancel_pending("cancelled by the user")
+check(floats() == 0, "cancel closes the free-text float")
 local got = tools.poll(res.pending)
 check(got and got.isError and got.content[1].text == "cancelled by the user", "cancel_pending resolves it with an error")
 check(tools.poll(res.pending).isError, "poll after collection reports the id as cancelled")

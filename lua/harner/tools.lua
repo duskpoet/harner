@@ -385,6 +385,7 @@ M.tools.get_diagnostics = {
 }
 
 local ask -- opens a confirm float filed under the running call, defined below
+local in_chat -- runs a callback for the chat its call came from, defined below
 
 M.tools.ask_user = {
 	description = "Ask the user a question and wait for the answer. With `choices` the user picks one entry "
@@ -416,16 +417,38 @@ M.tools.ask_user = {
 				end
 			end)
 		else
-			vim.ui.input({ prompt = question .. " " }, function(text)
-				if text == nil then
-					resolve("The user dismissed the question without answering.", true)
+			-- a float, not vim.ui.input: its cmdline prompt blocks the main
+			-- loop, so nothing else (a cancel, the web UI) could answer
+			ask({ title = "Claude asks", body = vim.split(question, "\n"), input = true }, function(choice, text)
+				if choice == "text" then
+					resolve(text or "")
 				else
-					resolve(text)
+					resolve("The user dismissed the question without answering.", true)
 				end
 			end)
 		end
 	end,
 }
+
+---Wrap `fn` so it runs with `chat.ctx = cid`: callbacks that fire after the
+---handler returned (confirm answers, the classifier) act for the chat the
+---call came from, not whichever chat is current by then.
+---@param cid integer|nil
+---@param fn function
+---@return function
+in_chat = function(cid, fn)
+	return function(...)
+		local chat = require("harner.chat")
+		local prev = chat.ctx
+		chat.ctx = cid
+		local r = vim.F.pack_len(pcall(fn, ...))
+		chat.ctx = prev
+		if not r[1] then
+			error(r[2], 0)
+		end
+		return unpack(r, 2, r.n)
+	end
+end
 
 -- The async call whose handler is running: confirms it opens belong to it.
 local calling = nil ---@type integer|nil
@@ -436,6 +459,76 @@ local asking = {}
 ---@type table<integer, vim.SystemObj>
 local classifying = {}
 
+-- One confirm float at a time: floats decline on WinLeave, so a second one
+-- (another chat's overlapping run) would silently decline the first. Later
+-- questions wait here and open when the shown one closes.
+local queue = {} ---@type table[]
+local showing = nil ---@type table|nil
+
+local function pump()
+	if showing or #queue == 0 then
+		return
+	end
+	local e = table.remove(queue, 1)
+	showing = e
+	local opened, close = pcall(e.open, e.opts, function(choice, arg)
+		if showing == e then
+			showing = nil
+		end
+		local ok, err = pcall(e.finish, choice, arg)
+		pump()
+		if not ok then
+			error(err, 0)
+		end
+	end)
+	if opened then
+		e.real_close = close
+		return
+	end
+	-- the float did not open: decline it so the queue moves on
+	vim.notify("harner: cannot open the confirm: " .. tostring(close), vim.log.levels.ERROR)
+	if showing == e then
+		showing = nil
+	end
+	pcall(e.finish, "no")
+	pump()
+end
+
+---Queue a float (`open` is confirm.ask or confirm.input). Returns a close
+---function with the float's contract that also works while still queued
+---(cancel_pending, an answer from the web UI).
+---@return fun(choice:string, arg:any)
+local function open_queued(open, opts, cb)
+	local e = { open = open, opts = opts }
+	local done = false
+	e.finish = function(choice, arg)
+		if not done then
+			done = true
+			cb(choice, arg)
+		end
+	end
+	queue[#queue + 1] = e
+	pump()
+	return function(choice, arg)
+		if e.real_close then
+			e.real_close(choice, arg)
+			return
+		end
+		for i, q in ipairs(queue) do
+			if q == e then
+				table.remove(queue, i)
+				break
+			end
+		end
+		-- a float that returned no close function cannot block the queue
+		if showing == e then
+			showing = nil
+		end
+		e.finish(choice, arg)
+		pump()
+	end
+end
+
 ---confirm.ask for the running async call, remembered so cancel_pending can
 ---decline it: a confirm answered after its call was cancelled or timed out
 ---must not run or write anything.
@@ -445,12 +538,26 @@ local classifying = {}
 ---       (after the auto-mode classifier answered)
 ask = function(opts, cb, id)
 	id = id or calling
+	-- the answer runs later: keep the chat the call belongs to
+	local cid = require("harner.chat").ctx
 	-- opts.log = { tool, subject }: record the user's answer in the decision log
 	local log = opts.log
 	opts.log = nil
-	local close = require("harner.confirm").ask(opts, function(choice, index)
+	-- opts.input: free-text answer (confirm.input), cb gets ("text", answer)
+	local confirm = require("harner.confirm")
+	local is_input = opts.input == true
+	local open = is_input and confirm.input or confirm.ask
+	opts.input = nil
+	-- mirrored to the web host (when enabled) so it can be answered there too
+	local web = package.loaded["harner.web"]
+	local web_id
+	local close = open_queued(open, opts, in_chat(cid, function(choice, index)
 		if id then
 			asking[id] = nil
+		end
+		local via = web and web.answering and "web" or nil
+		if web_id then
+			web.on_resolved(web_id)
 		end
 		-- a decline from cancel_pending lands after the call ended: not an answer
 		if log and (not id or M.is_pending(id)) then
@@ -460,12 +567,16 @@ ask = function(opts, cb, id)
 				how = "user",
 				answer = choice,
 				note = opts.note,
+				via = via,
 			})
 		end
 		cb(choice, index)
-	end)
+	end))
 	if id and close then
 		asking[id] = close
+	end
+	if web and close then
+		web_id = web.on_pending(cid, vim.tbl_extend("force", opts, { input = is_input }), close)
 	end
 end
 
@@ -478,8 +589,7 @@ local fallback_grants = new_grants()
 
 ---@return { writes: boolean, commands: table<string, true>, shell: table<string, true> }
 local function grants()
-	local chat = require("harner.chat")
-	local c = chat.current and chat.chats[chat.current]
+	local c = require("harner.chat").active()
 	if not c then
 		return fallback_grants
 	end
@@ -522,7 +632,7 @@ local function auto_or_confirm(id, tool, args, action, rule_ok, run, confirm)
 		run()
 		return
 	end
-	local proc = auto.classify(action, function(allow, reason)
+	local proc = auto.classify(action, in_chat(require("harner.chat").ctx, function(allow, reason)
 		if id then
 			classifying[id] = nil
 		end
@@ -536,7 +646,7 @@ local function auto_or_confirm(id, tool, args, action, rule_ok, run, confirm)
 		else
 			confirm("auto mode asks: " .. (reason or "no reason given"))
 		end
-	end)
+	end))
 	-- the callback is always scheduled, so it cannot have run yet
 	if id and proc then
 		classifying[id] = proc
@@ -1484,16 +1594,24 @@ end
 ---@type table<integer, table|false>
 local pending = {}
 local pending_seq = 0
+-- chat id of each pending call (nil when the bridge sent none)
+---@type table<integer, integer>
+local owner = {}
 
-local function tool_done(name)
-	pcall(require("harner.chat").on_tool_done, name)
+local function tool_done(name, cid)
+	pcall(require("harner.chat").on_tool_done, name, cid)
 end
 
 ---MCP tools/call payload, or `{ pending = id }` for an async tool still
 ---waiting on the user.
 ---@param name string
 ---@param args table
-function M.call(name, args)
+---@param cid integer|nil chat the call belongs to (the bridge's HARNER_CHAT)
+function M.call(name, args, cid)
+	if cid == vim.NIL then
+		cid = nil
+	end
+	cid = tonumber(cid)
 	local t = M.tools[name]
 	if not t then
 		return text_result("unknown tool: " .. tostring(name), true)
@@ -1505,17 +1623,20 @@ function M.call(name, args)
 		pending_seq = pending_seq + 1
 		local id = pending_seq
 		pending[id] = false
+		owner[id] = cid
 		local function resolve(text, is_error)
 			if pending[id] == false then
 				pending[id] = text_result(tostring(text), is_error)
-				tool_done(name)
+				owner[id] = nil
+				tool_done(name, cid)
 			end
 		end
 		calling = id
-		local ok, err = pcall(t.handler, args or {}, resolve)
+		local ok, err = pcall(in_chat(cid, t.handler), args or {}, resolve)
 		calling = nil
 		if not ok then
 			pending[id] = nil
+			owner[id] = nil
 			return text_result("tool " .. name .. " failed: " .. tostring(err), true)
 		end
 		local res = pending[id]
@@ -1526,12 +1647,24 @@ function M.call(name, args)
 		end
 		return { pending = id }
 	end
-	local ok, res = pcall(t.handler, args or {})
+	local ok, res = pcall(in_chat(cid, t.handler), args or {})
 	if not ok then
 		return text_result("tool " .. name .. " failed: " .. tostring(res), true)
 	end
-	tool_done(name)
+	tool_done(name, cid)
 	return text_result(tostring(res))
+end
+
+---Cancel the pending calls of one chat (its run was cancelled or ended).
+---Calls without a chat id (direct calls, tests) go with any chat's.
+---@param reason string
+---@param cid integer
+function M.cancel_chat(reason, cid)
+	for id, v in pairs(pending) do
+		if v == false and (owner[id] == nil or owner[id] == cid) then
+			M.cancel_pending(reason, id)
+		end
+	end
 end
 
 ---True while the async call `id` waits for its result.
@@ -1561,16 +1694,17 @@ end
 ---@param id integer|nil
 function M.cancel_pending(reason, id)
 	local ids = id and { id } or vim.tbl_keys(pending)
-	local cancelled = false
+	local cancelled = {}
 	for _, k in ipairs(ids) do
 		if pending[k] == false then
 			pending[k] = text_result(reason, true)
-			cancelled = true
+			cancelled[owner[k] or 0] = true
+			owner[k] = nil
 		end
 	end
-	if cancelled then
+	for cid in pairs(cancelled) do
 		-- the winbar still says "running <tool>" (on_tool_done ignores the name)
-		tool_done(nil)
+		tool_done(nil, cid ~= 0 and cid or nil)
 	end
 	-- an open confirm would otherwise still run or write after the call
 	-- ended; its decline lands on an already resolved call and is dropped
