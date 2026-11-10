@@ -39,9 +39,12 @@ M.config = {
 	-- through ssh/dtach since nvim emits a plain OSC 2. `prefix` is a string or
 	-- a function returning one, e.g. to show the dt session the editor runs in:
 	--   prefix = function() return vim.env.DT_NAME and ("dt @ " .. vim.env.DT_NAME .. " · ") or "" end
+	-- `format(state, chat)` replaces the whole title (prefix is then ignored), e.g.
+	--   format = function(state) return "ℌ " .. vim.fn.fnamemodify(vim.fn.getcwd(), ":t") .. " | " .. state end
 	title = {
 		enabled = false,
 		prefix = "", ---@type string|fun(): string
+		format = nil, ---@type fun(state: string, chat: table): string|nil
 	},
 	-- the run_command tool: Ex commands Claude may run. `confirm` asks the user
 	-- (a confirm float) before each command unless it starts with an `allow` entry

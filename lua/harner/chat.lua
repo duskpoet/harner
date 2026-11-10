@@ -168,10 +168,19 @@ local function set_winbar(chat, state)
 	end
 	local cfg = require("harner").config.title
 	if cfg and cfg.enabled then
-		local prefix = type(cfg.prefix) == "function" and cfg.prefix() or cfg.prefix or ""
+		local text
+		if type(cfg.format) == "function" then
+			-- a user callback must not break send()/on_done: fall back on error or non-string
+			local ok, res = pcall(cfg.format, state, chat)
+			text = ok and type(res) == "string" and res or nil
+		end
+		if not text then
+			local prefix = type(cfg.prefix) == "function" and cfg.prefix() or cfg.prefix or ""
+			text = prefix .. "harner " .. state
+		end
 		vim.o.title = true
 		-- 'titlestring' is evaluated like 'statusline' when it contains '%'
-		vim.o.titlestring = (prefix .. "harner " .. state):gsub("%%", "%%%%")
+		vim.o.titlestring = text:gsub("%%", "%%%%")
 	end
 end
 

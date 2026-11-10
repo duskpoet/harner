@@ -204,6 +204,7 @@ require("harner").setup({
   title = {
     enabled = false,      -- mirror the chat state into the terminal title ('titlestring')
     prefix = "",          -- string or function, e.g. the ssh/dtach session the editor runs in
+    format = nil,         -- function(state, chat) -> string, replaces the whole title (prefix ignored)
   },
   run_command = {
     confirm = true,       -- ask before each command not covered by `allow`

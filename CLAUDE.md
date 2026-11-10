@@ -444,6 +444,9 @@ nvim --headless -u NONE -l tests/web_test.lua
 # popup + <leader>h keymaps, offline; the only test that stubs the runner
 nvim --headless -u NONE -l tests/prompt_test.lua
 
+# terminal title: prefix, format, format falling back on error / non-string
+nvim --headless -u NONE -l tests/title_test.lua
+
 # confirm float (full text, y/a/n), per-chat grants, multi-path save_file,
 # cancel closing a confirm, edits reusing one window instead of splitting,
 # edit_file's save/drop prompt on a buffer with the user's unsaved changes
