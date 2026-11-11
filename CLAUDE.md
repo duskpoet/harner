@@ -98,6 +98,13 @@ All modules live in `lua/harner/`:
   at `content_block_stop` (`on_tool_input(name, input)`). The `assistant`
   message event is only used as a fallback when no stream events arrived
   (`got_stream`). The final line has `duration_api_ms` / `total_cost_usd`.
+  Each top-level `message_start` (no `parent_tool_use_id`, so subagents are
+  skipped) reports `input + cache_creation + cache_read` tokens via
+  `on_usage`, and the result line the window from
+  `modelUsage[model].contextWindow` (`context_window()`: exact model key, else
+  only a single entry, since WebFetch's haiku call adds one). chat.lua merges
+  both into `chat.context`, shown in the winbar as
+  `ctx 42k/200k 21%` (`context_badge()`, warn ≥ 50 %, error ≥ 80 %).
   A missing `claude_cmd` is reported through `on_error`/`on_done` (scheduled,
   so the caller has stored the run first) without spawning anything.
 - `mcp.lua` — writes the temp MCP config (server name `nvim`, command

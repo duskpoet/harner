@@ -27,6 +27,7 @@ local SEP = string.rep("─", 40)
 ---@field last_prompt string|nil the user's latest message (classifier context)
 ---@field state string|nil last winbar state
 ---@field grants table|nil `a` approvals (tools.lua)
+---@field context {used:integer, window:integer|nil, model:string|nil}|nil tokens in the session's context
 
 ---@type table<integer, HarnerChat>
 M.chats = {}
@@ -154,6 +155,33 @@ vim.api.nvim_create_autocmd("ColorScheme", {
 	callback = define_hl,
 })
 
+local function tokens(n)
+	local k = math.floor(n / 1000 + 0.5)
+	if k >= 1000 then
+		return (string.format("%.1fM", n / 1e6):gsub("%.0M", "M"))
+	elseif n >= 1000 then
+		return k .. "k"
+	end
+	return tostring(n)
+end
+
+---Context usage for the winbar: `ctx 42k/200k 21%`, coloured from 50% / 80%.
+---@param chat HarnerChat
+---@return string
+function M.context_badge(chat)
+	local c = chat.context
+	if not c then
+		return ""
+	end
+	if not (c.window and c.window > 0) then
+		return " · ctx " .. tokens(c.used)
+	end
+	local pct = math.floor(c.used * 100 / c.window + 0.5)
+	local hl = pct >= 80 and "DiagnosticError" or pct >= 50 and "DiagnosticWarn" or nil
+	local text = string.format("ctx %s/%s %d%%%%", tokens(c.used), tokens(c.window), pct)
+	return " · " .. (hl and ("%#" .. hl .. "#" .. text .. "%*") or text)
+end
+
 local function set_winbar(chat, state)
 	chat.state = state
 	local web = package.loaded["harner.web"]
@@ -164,7 +192,13 @@ local function set_winbar(chat, state)
 	if win then
 		local badge = chat.auto and " %#DiagnosticWarn#AUTO%*" or ""
 		vim.wo[win].winhighlight = "WinBar:HarnerWinBar,WinBarNC:HarnerWinBarNC"
-		vim.wo[win].winbar = string.format("%%#Title# harner #%d %%* %s%s", chat.id, state, badge)
+		vim.wo[win].winbar = string.format(
+			"%%#Title# harner #%d %%* %s%s%s",
+			chat.id,
+			state:gsub("%%", "%%%%"),
+			M.context_badge(chat),
+			badge
+		)
 	end
 	local cfg = require("harner").config.title
 	if cfg and cfg.enabled then
@@ -461,6 +495,17 @@ local function send_chat(chat, opts)
 		end,
 		on_tool_input = function(name, input)
 			amend_tool_note(chat, name, input)
+		end,
+		on_usage = function(usage)
+			-- tokens come per API call, the window with the result: keep it while the model stays
+			local prev = chat.context or {}
+			local same = prev.model == nil or prev.model == usage.model
+			chat.context = {
+				used = usage.used or prev.used or 0,
+				model = usage.model or prev.model,
+				window = usage.window or (same and prev.window or nil),
+			}
+			M.refresh_winbar(chat)
 		end,
 		on_error = function(msg)
 			append_lines(chat, { "", "> **error:** " .. msg:gsub("\n", "\n> ") })

@@ -6,9 +6,26 @@ local M = {}
 ---@field proc vim.SystemObj|nil
 ---@field session_id string
 
+---Context window of `model` from a result's `modelUsage`. Several models can show
+---up (e.g. WebFetch's haiku call), so without an exact key it only guesses when
+---there is one entry.
+---@return integer|nil
+local function context_window(mu, model)
+	if type(mu) ~= "table" then
+		return nil
+	end
+	local entry = model and mu[model]
+	if not entry then
+		local key, only = next(mu)
+		entry = key ~= nil and next(mu, key) == nil and only or nil
+	end
+	return type(entry) == "table" and tonumber(entry.contextWindow) or nil
+end
+
 ---@param opts {prompt:string, session_id:string, resume:boolean, cwd:string, chat_id:integer|nil,
 ---  on_text:fun(text:string), on_tool:fun(name:string), on_done:fun(result:table|nil),
----  on_error:fun(msg:string), on_tool_input:fun(name:string, input:table)|nil}
+---  on_error:fun(msg:string), on_tool_input:fun(name:string, input:table)|nil,
+---  on_usage:fun(usage:{used:integer|nil, window:integer|nil, model:string|nil})|nil}
 ---@return HarnerRun
 function M.start(opts)
 	local config = require("harner").config
@@ -94,6 +111,7 @@ function M.start(opts)
 	-- tool_use blocks in flight, by content block index: their input streams
 	-- as input_json_delta fragments and is complete at content_block_stop
 	local blocks = {}
+	local model = nil -- model of the last top-level API call
 
 	local function tool_input(name, input)
 		if opts.on_tool_input and type(input) == "table" then
@@ -105,6 +123,19 @@ function M.start(opts)
 		if ev.type == "stream_event" and ev.event then
 			got_stream = true
 			local e = ev.event
+			-- the prompt of a top-level API call is what the session's context holds now
+			-- (subagent calls carry a parent_tool_use_id and have their own context)
+			local top = ev.parent_tool_use_id == nil or ev.parent_tool_use_id == vim.NIL
+			if e.type == "message_start" and top and e.message and opts.on_usage then
+				local u = e.message.usage
+				if type(u) == "table" then
+					model = e.message.model
+					opts.on_usage({
+						used = (u.input_tokens or 0) + (u.cache_creation_input_tokens or 0) + (u.cache_read_input_tokens or 0),
+						model = e.message.model,
+					})
+				end
+			end
 			if e.type == "content_block_delta" and e.delta then
 				if e.delta.type == "text_delta" then
 					opts.on_text(e.delta.text)
@@ -134,6 +165,10 @@ function M.start(opts)
 			end
 		elseif ev.type == "result" or ev.duration_api_ms then
 			result = ev
+			local window = context_window(ev.modelUsage, model)
+			if window and model and opts.on_usage then -- no usage seen: nothing to put it against
+				opts.on_usage({ window = window, model = model })
+			end
 			if ev.is_error then
 				opts.on_error(ev.result or (ev.errors and table.concat(ev.errors, "\n")) or "claude returned an error")
 			end

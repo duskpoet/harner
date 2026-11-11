@@ -7,6 +7,9 @@ vim.o.columns = 160; vim.o.lines = 50
 local fake = vim.fn.tempname() .. "-fake-claude"
 local events = {
   { type = "system", subtype = "init" },
+  { type = "stream_event", parent_tool_use_id = vim.NIL, event = { type = "message_start", message = { model = "m1", usage = { input_tokens = 2, cache_creation_input_tokens = 40000, cache_read_input_tokens = 2000 } } } },
+  -- a subagent's call has its own context: ignored
+  { type = "stream_event", parent_tool_use_id = "t9", event = { type = "message_start", message = { model = "m1", usage = { input_tokens = 900000 } } } },
   { type = "stream_event", event = { type = "content_block_start", index = 0, content_block = { type = "text", text = "" } } },
   { type = "stream_event", event = { type = "content_block_delta", index = 0, delta = { type = "text_delta", text = "Let me look. " } } },
   { type = "stream_event", event = { type = "content_block_stop", index = 0 } },
@@ -21,7 +24,8 @@ local events = {
   { type = "stream_event", event = { type = "content_block_stop", index = 4 } },
   { type = "stream_event", event = { type = "content_block_start", index = 3, content_block = { type = "text", text = "" } } },
   { type = "stream_event", event = { type = "content_block_delta", index = 3, delta = { type = "text_delta", text = "Done." } } },
-  { type = "result", subtype = "success", is_error = false, duration_api_ms = 10, total_cost_usd = 0.0123, result = "Done." },
+  { type = "result", subtype = "success", is_error = false, duration_api_ms = 10, total_cost_usd = 0.0123, result = "Done.",
+    modelUsage = { m1 = { contextWindow = 200000 }, helper = { contextWindow = 1000000 } } },
 }
 local lines = { "#!/bin/sh", "cat >/dev/null" }
 for _, e in ipairs(events) do
@@ -52,6 +56,8 @@ check(text:find("Done.", 1, true) ~= nil, "final text present")
 check(not text:find("error", 1, true), "no error in transcript:\n" .. text)
 local win = vim.fn.bufwinid(buf)
 check(vim.wo[win].winbar:find("idle · $0.012", 1, true) ~= nil, "winbar shows idle + cost: " .. vim.wo[win].winbar)
+check(vim.wo[win].winbar:find("ctx 42k/200k 21%%", 1, true) ~= nil, "winbar shows context usage: " .. vim.wo[win].winbar)
+check(c.context and c.context.used == 42002, "subagent usage ignored")
 check(c.started == true, "session marked started")
 
 -- missing binary: error line + run cleared, no process started
