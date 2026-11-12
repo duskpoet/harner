@@ -46,6 +46,16 @@ M.config = {
 		prefix = "", ---@type string|fun(): string
 		format = nil, ---@type fun(state: string, chat: table): string|nil
 	},
+	-- chat transcript decorations: aligned box tables, shaded code blocks,
+	-- highlighted URLs and `file.lua:12` references (`gf` follows them), and
+	-- 'conceallevel' 2 so markdown markup (`**`, backticks, link targets) hides
+	-- off the cursor line. Colours: HarnerCodeBlock, HarnerTableBorder,
+	-- HarnerTableHead, HarnerUrl, HarnerFileRef, HarnerToolNote, ...
+	render = {
+		enabled = true,
+		conceal = true,
+		tables = true,
+	},
 	-- the run_command tool: Ex commands Claude may run. `confirm` asks the user
 	-- (a confirm float) before each command unless it starts with an `allow` entry
 	-- (matched as whole words: "Git log" allows "Git log --oneline", not "Git logx").

@@ -230,6 +230,42 @@ local function show_range(buf, first, last)
 	return first, last
 end
 
+---Open `path` at `line` (to `end_line`) the way open_file does; used by the
+---chat's `gf` on a `file.lua:12` reference. Falls back to a search below cwd
+---when the path does not resolve (Claude often names just the file tail).
+---@param path string
+---@param line integer|nil
+---@param end_line integer|nil
+---@return boolean opened
+function M.open_ref(path, line, end_line)
+	local abs = resolve_path(path)
+	if not abs then
+		-- first file below cwd whose path ends with `path`; skips heavy dirs so a
+		-- false positive (`localhost.localdomain:8080`) can't stall the editor
+		-- (vim.fs.find has no `skip`; vim.fs.dir does)
+		local suffix = "/" .. path:gsub("^%./", "")
+		local heavy = { [".git"] = true, node_modules = true, target = true, dist = true, build = true }
+		local cwd = vim.fn.getcwd()
+		for rel, type in vim.fs.dir(cwd, {
+			depth = 20,
+			skip = function(dir)
+				return not heavy[vim.fs.basename(dir)] -- false: don't descend
+			end,
+		}) do
+			if type == "file" and vim.endswith("/" .. rel, suffix) then
+				abs = cwd .. "/" .. rel
+				break
+			end
+		end
+		if not abs then
+			return false
+		end
+	end
+	line = line or 1
+	show_range(load_buf(abs), line, end_line or line)
+	return true
+end
+
 M.tools.open_file = {
 	description = "Open a file in the editor and move the cursor to a line, optionally highlighting a line range. "
 		.. "Use it to take the user to the code you are talking about instead of quoting it. "

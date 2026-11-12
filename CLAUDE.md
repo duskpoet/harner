@@ -81,6 +81,25 @@ All modules live in `lua/harner/`:
   windows whose buffer has an empty `buftype` qualify, so NERDTree, terminals,
   quickfix, help and show_text windows are never split or replaced (asking
   from the NERDTree window targets the file window next to it).
+- `render.lua` — transcript decorations (`config.render`). `attach(buf,
+  limit)` hooks `nvim_buf_attach` and re-renders the whole buffer 40 ms after
+  the last change (namespace `harner_render`, errors reported once). Markdown
+  colours and conceal come from treesitter; the chat window gets
+  `conceallevel=2`, `concealcursor=""`. Tables are the only text change: rows
+  on lines `1..limit` (chat.lua passes the last separator, or line count − 1
+  while a run streams) are re-padded in place (same line count, so
+  `tool_line` stays valid) to widths of the *concealed* text
+  (`visible_width()`), then pipes get `│` overlays, the delimiter row a
+  `├─┼─┤` overlay and virt_lines borders. Also shaded fenced code (language
+  right-aligned on its first line), `HarnerToolNote`/`HarnerSeparator`/
+  `HarnerError` lines, and `refs(line)` URLs / `path.ext:N[-M]` spans.
+  `follow()` (chat-buffer `gf`) opens URLs with `vim.ui.open` and file refs
+  (or the plain `<cfile>`) through `tools.open_ref` (resolve, else the first
+  path below cwd ending with the ref via `vim.fs.dir` pruning `.git`/
+  `node_modules`/`target`/`dist`/`build`: `vim.fs.find` has no `skip`; then
+  `show_range`). Passes are throttled (a pending render is not restarted) and
+  start at `st.done`, the row after the last finished separator; an
+  `on_lines` change above it resets to a full pass.
 - `prompt.lua` — floating input popup (`<leader>hh`). Markdown scratch buffer,
   grows with `nvim_win_text_height` up to `config.prompt.max_height`. `<CR>`
   sends via `chat.ask` and returns focus to the window it was opened from,
@@ -392,6 +411,9 @@ nvim --headless -u NONE -l tests/chats_test.lua
 
 # popup + <leader>h keymaps, offline; the only test that stubs the runner
 nvim --headless -u NONE -l tests/prompt_test.lua
+
+# transcript rendering: table alignment + overlays, code shading, refs, gf
+nvim --headless -u NONE -l tests/render_test.lua
 
 # terminal title: prefix, format, format falling back on error / non-string
 nvim --headless -u NONE -l tests/title_test.lua

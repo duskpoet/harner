@@ -610,6 +610,19 @@ attach_buf = function(chat)
 	map("n", "<C-c>", cancel, "harner: cancel")
 	map("i", "<C-c>", cancel, "harner: cancel")
 
+	local render = require("harner.render")
+	if render.enabled() then
+		map("n", "gf", render.follow, "harner: open link or file reference")
+		-- tables are aligned in finished text only: not the line still
+		-- streaming, not the input below the last separator
+		render.attach(buf, function()
+			if chat.run then
+				return vim.api.nvim_buf_line_count(buf) - 1
+			end
+			return (last_sep_index(buf)) or 0
+		end)
+	end
+
 	vim.api.nvim_create_autocmd({ "BufUnload", "BufWipeout" }, {
 		buffer = buf,
 		callback = function()
@@ -678,6 +691,7 @@ local function open_win(chat, focus)
 	vim.wo[win].relativenumber = false
 	vim.wo[win].signcolumn = "no"
 	vim.wo[win].winfixwidth = true
+	require("harner.render").setup_win(win)
 	M.refresh_winbar(chat)
 	vim.api.nvim_win_set_cursor(win, { vim.api.nvim_buf_line_count(buf), 0 })
 	M.current = chat.id
@@ -697,6 +711,7 @@ local function show(chat, focus)
 		return open_win(chat, focus)
 	end
 	vim.api.nvim_win_set_buf(win, buf_of(chat))
+	require("harner.render").setup_win(win)
 	M.current = chat.id
 	M.refresh_winbar(chat)
 	if focus ~= false then

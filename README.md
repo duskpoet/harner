@@ -182,6 +182,11 @@ require("harner").setup({
     prefix = "",          -- string or function, e.g. the ssh/dtach session the editor runs in
     format = nil,         -- function(state, chat) -> string, replaces the whole title (prefix ignored)
   },
+  render = {
+    enabled = true,       -- decorate the transcript: box tables, shaded code, URL / file:line links (`gf` follows)
+    conceal = true,       -- 'conceallevel' 2: hide `**`, backticks, fences, link targets off the cursor line
+    tables = true,        -- re-pad finished tables so columns line up
+  },
   run_command = {
     confirm = true,       -- ask before each command not covered by `allow`
     allow = { "edit", "Telescope", "DiffviewOpen", "Git blame", "Git log", "Git diff" },

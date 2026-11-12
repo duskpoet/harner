@@ -165,6 +165,8 @@ end
 function M.system_note(cwd)
 	return table.concat({
 		"You are answering inside the user's Neovim through the harner plugin; replies are rendered in a narrow chat split.",
+		"Markdown is rendered there (tables aligned with borders, code blocks shaded, URLs and path:line references",
+		"clickable), so use tables for tabular data but keep them to a few narrow columns.",
 		"Tools prefixed mcp__nvim__ give you the editor: get_current_buffer, get_cursor, get_selection, list_buffers,",
 		"get_diagnostics to read what the user is looking at; show_text to display content to them; open_file to jump",
 		"the editor to a file and line range; ask_user to ask a question and wait for the answer; run_command to run an",
