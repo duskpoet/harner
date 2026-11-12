@@ -32,7 +32,7 @@ vim.api.nvim_create_autocmd("ColorScheme", {
 })
 
 ---Answer keys a confirm offers besides `n` (decline) and the item digits:
----y (yes), a (always), then `opts.choices`. Shared with the web mirror.
+---y (yes), a (always), then `opts.choices`.
 ---@param opts HarnerConfirmOpts
 ---@return {key:string, label:string, value:string}[]
 function M.keys(opts)

@@ -184,10 +184,6 @@ end
 
 local function set_winbar(chat, state)
 	chat.state = state
-	local web = package.loaded["harner.web"]
-	if web then
-		web.on_meta(chat)
-	end
 	local win = chat_win(chat)
 	if win then
 		local badge = chat.auto and " %#DiagnosticWarn#AUTO%*" or ""
@@ -475,10 +471,6 @@ local function send_chat(chat, opts)
 	scroll_to_end(chat)
 	set_winbar(chat, "thinking…")
 
-	local web = package.loaded["harner.web"]
-	if web then
-		web.ensure() -- the host may have gone away since the last run
-	end
 	local runner = require("harner.runner")
 	chat.run = runner.start({
 		prompt = prompt,
@@ -527,10 +519,6 @@ local function send_chat(chat, opts)
 			end
 		end,
 	})
-	-- the winbar update above ran before chat.run was set: mirror running=true
-	if web and chat.run then
-		web.on_meta(chat)
-	end
 	return true
 end
 
@@ -552,18 +540,9 @@ local function cancel_chat(chat)
 	end
 end
 
----Cancel the run of a chat by id (the web UI).
----@param id integer
-function M.cancel_id(id)
-	local chat = M.chats[id]
-	if chat then
-		cancel_chat(chat)
-	end
-end
-
 ---Cancel the run of a chat buffer's chat, or of the current chat. When the
 ---current chat is idle (<leader>hx, :HarnerCancel) and exactly one other chat
----runs (a prompt from the web), that one is cancelled; with several running
+---runs, that one is cancelled; with several running
 ---nothing is guessed.
 ---@param buf integer|nil
 function M.cancel(buf)
@@ -637,10 +616,6 @@ attach_buf = function(chat)
 			detach(chat, buf)
 		end,
 	})
-	local web = package.loaded["harner.web"]
-	if web then
-		web.on_buf(chat)
-	end
 end
 
 local function create_chat()
@@ -736,20 +711,19 @@ function M.open()
 	vim.cmd("startinsert!")
 end
 
----Send `prompt` to the current chat (or chat `id`) without typing into the
----chat buffer. Used by the input popup, :HarnerAsk and the web UI. Replaces
----any draft below the separator. Opens the chat window (unfocused) if it is
----hidden so the answer is visible.
+---Send `prompt` to the current chat without typing into the chat buffer.
+---Used by the input popup and :HarnerAsk. Replaces any draft below the
+---separator. Opens the chat window (unfocused) if it is hidden so the answer
+---is visible.
 ---@param prompt string
 ---@param origin_win integer|nil window the question is about
----@param id integer|nil chat id, default the current chat
 ---@return boolean sent
-function M.ask(prompt, origin_win, id)
+function M.ask(prompt, origin_win)
 	prompt = vim.trim(prompt or "")
 	if prompt == "" then
 		return false
 	end
-	local chat = id and M.chats[id] or M.ensure()
+	local chat = M.ensure()
 	if chat.run then
 		vim.notify("harner: still running, <leader>hx to cancel", vim.log.levels.WARN)
 		return false
@@ -758,18 +732,10 @@ function M.ask(prompt, origin_win, id)
 	local sep_idx = last_sep_index(buf)
 	vim.api.nvim_buf_set_lines(buf, sep_idx or 0, -1, false, vim.split(prompt, "\n", { plain = true }))
 	origin_win = origin_win or vim.api.nvim_get_current_win()
-	-- a prompt for another chat (the web UI) while a chat is on screen runs in
-	-- the background: no second split, the current chat stays current
-	local background = id ~= nil and id ~= M.current and any_chat_win() ~= nil
-	if require("harner").config.prompt.open_chat and not background then
+	if require("harner").config.prompt.open_chat then
 		open_win(chat, false)
 	end
-	local prev = M.current
-	local sent = send_chat(chat, { origin_win = origin_win })
-	if background then
-		M.current = prev
-	end
-	return sent
+	return send_chat(chat, { origin_win = origin_win })
 end
 
 ---Start a fresh chat with a new session; the old ones stay (`:HarnerChats`).
@@ -791,7 +757,7 @@ function M.toggle()
 	end
 end
 
----Chats sorted by id, for the picker and the web mirror.
+---Chats sorted by id, for the picker.
 ---@return HarnerChat[]
 function M.list()
 	local out = vim.tbl_values(M.chats)

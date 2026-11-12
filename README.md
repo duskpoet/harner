@@ -50,7 +50,6 @@ instead, list the commands and keys in the spec:
 | `<leader>ht` / `:Harner` | toggle the chat split                                              |
 | `<leader>hn` / `:HarnerNew` | new chat (fresh Claude session; the old chat is kept)           |
 | `<leader>hl` / `:HarnerChats` | pick one of this nvim's chats to show                         |
-| `:HarnerWeb`             | show and copy the web UI sign-in URL (see [Web UI](#web-ui))       |
 | `<leader>hx` / `:HarnerCancel` | cancel the running request (the current chat's, else the only running one) |
 | `<leader>ha` / `:HarnerAuto` | toggle auto mode (fewer confirms) for the current chat         |
 | `:HarnerAsk [text]`      | send text directly, or open the popup when called bare; `:'<,'>HarnerAsk` attaches the range |
@@ -68,29 +67,6 @@ Chats live until nvim exits. Closing the split, `:bdelete` or `:bwipeout` on
 a chat buffer only hides it; `<leader>hl` brings it back with the same
 transcript and Claude session. Several chats can run at once; each one's
 tools act on the window it was asked from.
-
-### Web UI
-
-Off by default. With `web = { enabled = true }` the first nvim starts a small
-host process (one per user, `nvim -l`, exits 5 minutes after the last nvim
-quits) that mirrors the chats of every running nvim. A browser can then read
-them, answer Claude's questions and confirms (whichever side answers first
-wins, the other closes), send prompts and cancel runs. Chats of an nvim that
-exited stay readable until the host exits.
-
-`:HarnerWeb` shows the sign-in URL (`http://<host>:<port>/?token=…`, also put
-in the `+` register). Opening it once moves the token into a cookie.
-
-**It can approve shell commands, so treat the URL like a password.** The
-server is plain HTTP: keep `host` on `127.0.0.1` and use `ssh -L 7337:127.0.0.1:7337`,
-or bind your tailnet address (`host = "100.x.y.z"`). Never bind a LAN or
-public interface without a tunnel. Every request needs the token (an
-HttpOnly SameSite=Strict cookie for the name you signed in under);
-POSTs must be same-origin JSON; the page sends a strict CSP and renders
-Claude's markdown with raw HTML escaped. Delete the token file
-(`stdpath("state")/harner/web-token`) and restart the host to revoke it.
-Browser notifications only work on `localhost` or HTTPS; elsewhere the tab
-title shows the number of waiting questions.
 
 ### What Claude can do in the editor
 
@@ -241,14 +217,6 @@ require("harner").setup({
     cancel = "<leader>hx",
     auto = "<leader>ha",
     list = "<leader>hl",
-  },
-  web = {                 -- see "Web UI"; settings come from the nvim that starts the host
-    enabled = false,
-    host = "127.0.0.1",   -- address to bind (your tailnet IP to reach it remotely)
-    port = 7337,
-    idle_exit = 300,      -- seconds the host stays up after the last nvim quit
-    socket = nil,         -- default $XDG_RUNTIME_DIR/harner/host.sock
-    token_file = nil,     -- default stdpath("state")/harner/web-token
   },
   prompt = {
     width = 0.6,

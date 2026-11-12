@@ -418,7 +418,7 @@ M.tools.ask_user = {
 			end)
 		else
 			-- a float, not vim.ui.input: its cmdline prompt blocks the main
-			-- loop, so nothing else (a cancel, the web UI) could answer
+			-- loop, so nothing else (a cancel) could answer
 			ask({ title = "Claude asks", body = vim.split(question, "\n"), input = true }, function(choice, text)
 				if choice == "text" then
 					resolve(text or "")
@@ -496,7 +496,7 @@ end
 
 ---Queue a float (`open` is confirm.ask or confirm.input). Returns a close
 ---function with the float's contract that also works while still queued
----(cancel_pending, an answer from the web UI).
+---(cancel_pending).
 ---@return fun(choice:string, arg:any)
 local function open_queued(open, opts, cb)
 	local e = { open = open, opts = opts }
@@ -548,16 +548,9 @@ ask = function(opts, cb, id)
 	local is_input = opts.input == true
 	local open = is_input and confirm.input or confirm.ask
 	opts.input = nil
-	-- mirrored to the web host (when enabled) so it can be answered there too
-	local web = package.loaded["harner.web"]
-	local web_id
 	local close = open_queued(open, opts, in_chat(cid, function(choice, index)
 		if id then
 			asking[id] = nil
-		end
-		local via = web and web.answering and "web" or nil
-		if web_id then
-			web.on_resolved(web_id)
 		end
 		-- a decline from cancel_pending lands after the call ended: not an answer
 		if log and (not id or M.is_pending(id)) then
@@ -567,16 +560,12 @@ ask = function(opts, cb, id)
 				how = "user",
 				answer = choice,
 				note = opts.note,
-				via = via,
 			})
 		end
 		cb(choice, index)
 	end))
 	if id and close then
 		asking[id] = close
-	end
-	if web and close then
-		web_id = web.on_pending(cid, vim.tbl_extend("force", opts, { input = is_input }), close)
 	end
 end
 

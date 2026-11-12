@@ -112,20 +112,12 @@ check(tools.is_pending(rb.pending), "B's call still waiting")
 tools.cancel_pending("cleanup")
 confirm.ask = orig_ask
 
--- a prompt for a chat that is not on screen (the web UI) runs in the background
+-- A keeps running after switching to B
 vim.wait(3000, function() return not a.run and not b.run end, 20)
+chat.show(a, false)
+check(chat.ask("background question"), "ask to A sent")
 chat.show(b, false)
-local function chat_wins()
-  local n = 0
-  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-    if chat.by_buf(vim.api.nvim_win_get_buf(w)) then n = n + 1 end
-  end
-  return n
-end
-check(chat.current == b.id and chat_wins() == 1, "B shown and current")
-check(chat.ask("background question", nil, a.id), "background ask sent")
-check(chat.current == b.id, "B stays current: " .. tostring(chat.current))
-check(chat_wins() == 1, "no second chat split")
+check(chat.current == b.id, "B current: " .. tostring(chat.current))
 check(a.run ~= nil, "A runs")
 -- <leader>hx with the current chat idle cancels the one running chat
 local function cancelled(c)
@@ -135,8 +127,10 @@ chat.cancel()
 check(cancelled(a) and not cancelled(b), "idle current: the only running chat (A) is cancelled")
 vim.wait(3000, function() return not a.run end, 20)
 -- with several running, nothing is guessed
-chat.ask("again", nil, a.id)
-chat.ask("and B", nil, b.id)
+chat.show(a, false)
+chat.ask("again")
+chat.show(b, false)
+chat.ask("and B")
 chat.new()
 local idle = chat.chats[chat.current]
 local notify, warned = vim.notify, nil
