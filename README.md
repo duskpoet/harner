@@ -186,6 +186,7 @@ require("harner").setup({
     enabled = true,       -- decorate the transcript: box tables, shaded code, URL / file:line links (`gf` follows)
     conceal = true,       -- 'conceallevel' 2: hide `**`, backticks, fences, link targets off the cursor line
     tables = true,        -- re-pad finished tables so columns line up
+    wrap_tables = true,   -- wrap long cells onto extra rows when a table is wider than the chat window
   },
   run_command = {
     confirm = true,       -- ask before each command not covered by `allow`

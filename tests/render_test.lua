@@ -170,4 +170,52 @@ vim.cmd.cd(tmp)
 check(not tools.open_ref("hidden.lua", 1), "node_modules skipped")
 vim.cmd.cd(cwd)
 
+-- 7. a table wider than its window: long cells wrap onto continuation rows,
+-- and a wider window brings the original row back
+vim.cmd("tabnew")
+vim.cmd("vsplit")
+local wb = vim.api.nvim_create_buf(false, true)
+local ww = vim.api.nvim_get_current_win()
+vim.api.nvim_win_set_buf(ww, wb)
+vim.api.nvim_win_set_width(ww, 30)
+vim.api.nvim_buf_set_lines(wb, 0, -1, false, {
+	"| name | description |",
+	"|---|---|",
+	"| a | one two three four five six seven eight |",
+	"| b | short |",
+	"",
+})
+render.attach(wb, function()
+	return vim.api.nvim_buf_line_count(wb) - 1
+end)
+local wl = vim.api.nvim_buf_get_lines(wb, 0, -1, false)
+check(#wl == 7, "two continuation rows added, got " .. #wl .. " lines")
+-- (columns 4 and 18 wide: 30 - 7 for pipes and padding leaves 23 for the
+-- cells, the widest column gives way and then shrinks to its longest piece)
+local function row(a, b, w)
+	return "| " .. a .. string.rep(" ", 4 - #a) .. " | " .. b .. string.rep(" ", w - #b) .. " |"
+end
+check(wl[1] == row("name", "description", 18), "header fits: " .. wl[1])
+check(wl[3] == row("a", "one two three four", 18), "first piece: " .. tostring(wl[3]))
+check(wl[4] == row("", "five six seven", 18), "second piece: " .. tostring(wl[4]))
+check(wl[5] == row("", "eight", 18), "third piece: " .. tostring(wl[5]))
+check(wl[6] == row("b", "short", 18), "next row: " .. tostring(wl[6]))
+for _, l in ipairs(wl) do
+	check(vim.fn.strdisplaywidth(l) <= 30, "row fits the window: " .. l)
+end
+render.render(wb)
+check(vim.deep_equal(wl, vim.api.nvim_buf_get_lines(wb, 0, -1, false)), "wrapped table: second pass is a no-op")
+vim.api.nvim_win_set_width(ww, 25)
+render.render(wb)
+local narrow = vim.api.nvim_buf_get_lines(wb, 0, -1, false)
+check(narrow[3] == row("a", "one two three", 13), "re-wrapped from the original cells: " .. tostring(narrow[3]))
+check(narrow[4] == row("", "four five six", 13), "not from the earlier pieces: " .. tostring(narrow[4]))
+check(narrow[5] == row("", "seven eight", 13), "last piece: " .. tostring(narrow[5]))
+check(#narrow == 7, "still three lines for the row, got " .. #narrow .. " lines")
+vim.cmd("only")
+render.render(wb)
+wl = vim.api.nvim_buf_get_lines(wb, 0, -1, false)
+check(#wl == 5, "unwrapped in a wide window, got " .. #wl .. " lines")
+check(wl[3] == "| a    | one two three four five six seven eight |", "original row back: " .. tostring(wl[3]))
+
 t.finish()

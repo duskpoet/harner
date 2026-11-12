@@ -87,10 +87,22 @@ All modules live in `lua/harner/`:
   colours and conceal come from treesitter; the chat window gets
   `conceallevel=2`, `concealcursor=""`. Tables are the only text change: rows
   on lines `1..limit` (chat.lua passes the last separator, or line count − 1
-  while a run streams) are re-padded in place (same line count, so
-  `tool_line` stays valid) to widths of the *concealed* text
+  while a run streams) are re-padded in place to widths of the *concealed* text
   (`visible_width()`), then pipes get `│` overlays, the delimiter row a
-  `├─┼─┤` overlay and virt_lines borders. Also shaded fenced code (language
+  `├─┼─┤` overlay and virt_lines borders. A table wider than the chat
+  window (`text_width()`; `config.render.wrap_tables`) gets long body cells
+  wrapped onto real continuation rows (`|  | more |`), because a row that
+  'wrap' breaks tears the box apart and 'wrap' counts concealed text too
+  (so the room is the window width minus each column's concealed markup).
+  `shrink()` narrows the widest column first, never below the header
+  (headers are not wrapped: the delimiter row must follow) and below the
+  longest word only as a last resort; when even that does not fit the table
+  is left unwrapped. The line count therefore grows: `amend_tool_note`
+  searches down from `tool_line`. Each wrapped row has a `harner_render_wrap`
+  extmark on its first line with its original cells in `st.wrapped`, so the
+  next pass lays it out from the original (clean re-wrap / unwrap on
+  `WinResized` / `BufWinEnter`, which reset `st.done`); a rebuilt buffer
+  loses the marks and keeps the rows as they are. Also shaded fenced code (language
   right-aligned on its first line), `HarnerToolNote`/`HarnerSeparator`/
   `HarnerError` lines, and `refs(line)` URLs / `path.ext:N[-M]` spans.
   `follow()` (chat-buffer `gf`) opens URLs with `vim.ui.open` and file refs

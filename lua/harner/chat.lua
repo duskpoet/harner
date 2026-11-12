@@ -366,16 +366,27 @@ end
 local function amend_tool_note(chat, name, input)
 	local buf = buf_of(chat)
 	local line = chat.tool_line
-	if not line or line > vim.api.nvim_buf_line_count(buf) then
+	local count = vim.api.nvim_buf_line_count(buf)
+	if not line or line > count then
 		return
 	end
-	local cur = vim.api.nvim_buf_get_lines(buf, line - 1, line, false)[1]
 	local bare = tool_note(name)
-	-- mark_auto may have got there first: keep its suffix
-	local auto = cur and vim.startswith(cur, bare:sub(1, -2) .. " · auto (") and cur:sub(#bare) or nil
-	if cur ~= bare and not auto then
+	local marked = bare:sub(1, -2) .. " · auto ("
+	-- render.lua wrapping a table above the note adds lines, so the note may
+	-- have moved down since
+	local cur
+	for l = line, count do
+		local text = vim.api.nvim_buf_get_lines(buf, l - 1, l, false)[1]
+		if text == bare or vim.startswith(text, marked) then
+			line, cur = l, text
+			break
+		end
+	end
+	if not cur then
 		return
 	end
+	-- mark_auto may have got there first: keep its suffix
+	local auto = cur ~= bare and cur:sub(#bare) or nil
 	local summary = tool_summary(name, input)
 	if summary then
 		local note = tool_note(name, summary)

@@ -55,6 +55,9 @@ M.config = {
 		enabled = true,
 		conceal = true,
 		tables = true,
+		-- wrap long cells onto continuation rows when a table is wider than
+		-- the chat window (adds lines to the transcript)
+		wrap_tables = true,
 	},
 	-- the run_command tool: Ex commands Claude may run. `confirm` asks the user
 	-- (a confirm float) before each command unless it starts with an `allow` entry
