@@ -47,6 +47,25 @@ function M.ref_line(ref)
 	return string.format("Selection: %s %s (read it with get_selection)", path, range)
 end
 
+---The reference named by the last `ref_line()` in `text` (inverse of
+---ref_line), so a prompt re-sent from the chat buffer keeps its selection.
+---@param text string
+---@return HarnerRef|nil
+function M.parse_ref(text)
+	local found
+	for line in vim.gsplit(text, "\n", { plain = true }) do
+		local path, first, last = line:match("^Selection: (.+) lines? (%d+)%-?(%d*) %(read it with get_selection%)$")
+		if path then
+			found = { path = path, first = tonumber(first), last = tonumber(last) or tonumber(first) }
+		end
+	end
+	if not found or found.path == "[No Name]" then
+		return nil
+	end
+	found.path = vim.fn.fnamemodify(found.path, ":p")
+	return found
+end
+
 ---Describe the visual selection of the current buffer as a reference. Leaves
 ---visual mode first so the '< and '> marks (which get_selection reads) are set.
 ---@return HarnerRef|nil
@@ -163,10 +182,6 @@ function M.open(opts)
 		if prompt == "" then
 			return
 		end
-		if chat.busy() then
-			vim.notify("harner: still running, <leader>hx to cancel", vim.log.levels.WARN)
-			return
-		end
 		local ref = state.ref
 		if ref then
 			prompt = prompt .. "\n\n" .. M.ref_line(ref)
@@ -176,7 +191,7 @@ function M.open(opts)
 		if vim.api.nvim_win_is_valid(origin) then
 			vim.api.nvim_set_current_win(origin)
 		end
-		chat.ask(prompt, origin)
+		chat.ask(prompt, origin, ref)
 	end
 
 	local function map(mode, lhs, rhs, desc)

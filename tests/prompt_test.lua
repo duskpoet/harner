@@ -44,26 +44,53 @@ local lines = vim.api.nvim_buf_get_lines(c.buf, 0, -1, false)
 check(lines[1] == "## You" and lines[3] == "hello there" and lines[4] == "second line", "chat shows the question")
 check(chat.target_win() == edit_win, "target_win is the editor window")
 
--- busy guard: popup stays open, nothing sent
+-- busy: the popup queues the prompt, it is sent when the run finishes
 keys("<leader>hh")
 set({ "again" })
 keys("<CR>")
-check(#started == 1, "busy: nothing sent")
-check(vim.api.nvim_win_get_config(0).relative == "editor", "busy: popup still open")
--- Esc keeps the draft
+check(#started == 1, "busy: nothing started")
+check(vim.api.nvim_get_current_win() == edit_win, "busy: popup closed, back in editor")
+check(c.queue and #c.queue == 1 and c.queue[1].prompt == "again", "busy: prompt queued")
+check(vim.wo[vim.fn.bufwinid(c.buf)].winbar:find("1 queued", 1, true) ~= nil, "winbar shows the queue")
+started[1].on_done({ total_cost_usd = 0.01 })
+check(#started == 2 and started[2].prompt == "again" and started[2].resume == true, "queued prompt sent on finish, resuming")
+check(#c.queue == 0, "queue drained")
+check(vim.wo[vim.fn.bufwinid(c.buf)].winbar:find("queued", 1, true) == nil, "winbar queue badge gone")
+-- cancel: the queued prompts go back to the input instead of being sent
+vim.cmd("HarnerAsk later one")
+vim.cmd("HarnerAsk later two")
+check(#started == 2 and #c.queue == 2, "two prompts queued")
+chat.cancel()
+started[2].on_done(nil)
+check(#started == 2 and #c.queue == 0, "cancel: queue not sent")
+check(vim.wo[vim.fn.bufwinid(c.buf)].winbar:find("queued", 1, true) == nil, "cancel: winbar queue badge gone")
+lines = vim.api.nvim_buf_get_lines(c.buf, 0, -1, false)
+check(lines[#lines - 2] == "later one" and lines[#lines] == "later two", "cancel: queue moved to the draft: " .. vim.inspect(lines))
+
+-- an error result (API / auth error) does not send the queue either
+vim.cmd("HarnerAsk errored run")
+local n_err = #started
+vim.cmd("HarnerAsk after error")
+started[n_err].on_done({ is_error = true })
+check(#started == n_err and #c.queue == 0, "error result: queue not sent")
+lines = vim.api.nvim_buf_get_lines(c.buf, 0, -1, false)
+check(lines[#lines] == "after error", "error result: queue moved to the draft")
+
+-- Esc keeps the popup draft
+keys("<leader>hh")
+set({ "draft" })
 keys("<Esc>")
 check(vim.api.nvim_get_current_win() == edit_win, "Esc closed popup, back in editor")
-started[1].on_done({ total_cost_usd = 0.01 })
 keys("<leader>hh")
-check(vim.api.nvim_buf_get_lines(0, 0, -1, false)[1] == "again", "draft restored")
+check(vim.api.nvim_buf_get_lines(0, 0, -1, false)[1] == "draft", "draft restored")
 keys("<CR>")
-check(#started == 2 and started[2].resume == true, "second send resumes session")
-started[2].on_done({})
+check(#started == n_err + 1 and started[#started].prompt == "draft", "draft sent")
+started[#started].on_done({})
 
 -- :HarnerAsk with text sends directly
 vim.cmd("HarnerAsk from command")
-check(#started == 3 and started[3].prompt == "from command", ":HarnerAsk text sends directly")
-started[3].on_done({})
+check(#started == n_err + 2 and started[#started].prompt == "from command", ":HarnerAsk text sends directly")
+started[#started].on_done({})
 
 -- toggle from the editor hides/shows the chat
 keys("<leader>ht")
@@ -114,6 +141,18 @@ sent.on_done({})
 vim.cmd("2,3HarnerAsk explain")
 sent = started[#started]
 check(sent.prompt == "explain\n\nSelection: " .. relpath .. " lines 2-3 (read it with get_selection)", ":range HarnerAsk attaches reference, got " .. vim.inspect(sent.prompt))
+body = require("harner.tools").call("get_selection", {}).content[1].text
+check(body:find("lines: 2%-3") ~= nil, "get_selection follows the range reference, not the old marks: " .. body:gsub("\n", " | "))
+-- a queued reference still resolves after the user selected something else
+local n_started = #started
+vim.cmd("4,4HarnerAsk queued ref")
+check(#started == n_started, "queued behind the running request")
+keys("8GV9G<Esc>")
+sent.on_done({})
+sent = started[#started]
+check(sent.prompt:find("lines? 4") ~= nil, "queued prompt sent with its reference")
+body = require("harner.tools").call("get_selection", {}).content[1].text
+check(body:find("lines: 4%-4") ~= nil, "get_selection reads the queued reference: " .. body:gsub("\n", " | "))
 sent.on_done({})
 
 -- normal-mode popup has no reference even after a visual one
@@ -125,4 +164,30 @@ set({ "plain" })
 keys("<CR>")
 check(started[#started].prompt == "plain", "plain popup sends no reference")
 started[#started].on_done({})
+
+-- parse_ref inverts ref_line, so a reference survives a trip through the draft
+local pm = require("harner.prompt")
+local abs = root .. "/lua/harner/mcp.lua"
+for _, r in ipairs({ { path = abs, first = 5, last = 7 }, { path = abs, first = 4, last = 4 } }) do
+  local back = pm.parse_ref("question\n\n" .. pm.ref_line(r))
+  check(back and back.path == abs and back.first == r.first and back.last == r.last,
+    "parse_ref round trip " .. r.first .. "-" .. r.last .. ": " .. vim.inspect(back))
+end
+check(pm.parse_ref("no reference here") == nil, "parse_ref: nil without a Selection line")
+check(pm.parse_ref(pm.ref_line({ path = "", first = 1, last = 2 })) == nil, "parse_ref: [No Name] gives nil")
+-- a reference line sent from the chat buffer itself is honoured by get_selection
+local cur = chat.chats[chat.current]
+vim.api.nvim_buf_set_lines(cur.buf, -1, -1, false, { "again please", "", pm.ref_line({ path = abs, first = 9, last = 10 }) })
+chat.send(cur.buf)
+body = require("harner.tools").call("get_selection", {}).content[1].text
+check(body:find("lines: 9%-10") ~= nil, "chat-buffer send parses its reference: " .. body:gsub("\n", " | "))
+started[#started].on_done({})
+-- a reference to a missing file or past the end is an error, not an empty range
+cur.ref = { path = root .. "/no/such/file.lua", first = 1, last = 2 }
+res = require("harner.tools").call("get_selection", {})
+check(res.isError and res.content[1].text:find("no longer exist", 1, true), "missing file: " .. res.content[1].text)
+check(vim.fn.bufnr(root .. "/no/such/file.lua") == -1, "missing file: no empty buffer left behind")
+cur.ref = { path = abs, first = 100000, last = 100002 }
+res = require("harner.tools").call("get_selection", {})
+check(res.isError and res.content[1].text:find("no longer exist", 1, true), "past the end: " .. res.content[1].text)
 t.finish()

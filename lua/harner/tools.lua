@@ -316,22 +316,42 @@ M.tools.get_current_buffer = {
 }
 
 M.tools.get_selection = {
-	description = "Return the user's last visual selection in the working buffer (marks '< and '>), with path and line range.",
+	description = "Return the selection the user's message references (else their last visual selection in the working buffer, marks '< and '>), with path and line range.",
 	inputSchema = schema({}),
 	handler = function()
-		local win = target_win()
-		local buf = vim.api.nvim_win_get_buf(win)
-		local s = vim.api.nvim_buf_get_mark(buf, "<")
-		local e = vim.api.nvim_buf_get_mark(buf, ">")
-		if s[1] == 0 or e[1] == 0 then
-			return "No visual selection in " .. vim.api.nvim_buf_get_name(buf)
+		local buf, first, last
+		-- the reference sent with the message wins over the live marks: a
+		-- queued message runs later, when the marks may point elsewhere
+		local chat = require("harner.chat").active()
+		local ref = chat and chat.ref
+		if ref and ref.path ~= "" then
+			-- the file may have gone or shrunk while a queued message waited
+			local gone = string.format("The referenced lines %d-%d of %s no longer exist", ref.first, ref.last, ref.path)
+			buf = vim.fn.bufnr(ref.path)
+			if buf == -1 then
+				if vim.fn.filereadable(ref.path) == 0 then
+					error(gone, 0)
+				end
+				buf = vim.fn.bufadd(ref.path)
+			end
+			vim.fn.bufload(buf)
+			first, last = ref.first, math.min(ref.last, vim.api.nvim_buf_line_count(buf))
+			if first > last then
+				error(gone, 0)
+			end
+		else
+			buf = vim.api.nvim_win_get_buf(target_win())
+			first, last = vim.api.nvim_buf_get_mark(buf, "<")[1], vim.api.nvim_buf_get_mark(buf, ">")[1]
+			if first == 0 or last == 0 then
+				return "No visual selection in " .. vim.api.nvim_buf_get_name(buf)
+			end
 		end
-		local lines = vim.api.nvim_buf_get_lines(buf, s[1] - 1, e[1], false)
+		local lines = vim.api.nvim_buf_get_lines(buf, first - 1, last, false)
 		return string.format(
 			"path: %s\nlines: %d-%d\n---\n%s",
 			vim.api.nvim_buf_get_name(buf),
-			s[1],
-			e[1],
+			first,
+			last,
 			table.concat(lines, "\n")
 		)
 	end,

@@ -31,9 +31,11 @@ range as a reference.
 Selection handling is by reference, not by pasting: the popup title shows
 `mcp.lua:12-20` and the prompt gets a trailing line
 `Selection: <path> lines N-M (read it with get_selection)`. The system note in
-`mcp.lua` tells Claude that line is a pointer, and `get_selection` reads the
-`'<`/`'>` marks of the target window, so the two must stay consistent (the
-visual mapping leaves visual mode first so the marks are set).
+`mcp.lua` tells Claude that line is a pointer. The ref travels with the
+message (`chat.ask(prompt, origin, ref)` → queue entry → `chat.ref` at send),
+and `get_selection` reads `chat.ref` of the active chat, falling back to the
+`'<`/`'>` marks of the target window only for messages without one, so a
+queued message or a `:N,MHarnerAsk` range gets the lines it names.
 
 Its own git repo (`~/.config/nvim` is not one). The interactive
 Claude Code integration is a separate plugin (`coder/claudecode.nvim`); harner
@@ -75,7 +77,14 @@ All modules live in `lua/harner/`:
   `ensure()` creates the current chat lazily, `ask(prompt,
   origin_win)` writes the prompt below the separator, opens the split
   unfocused (`config.prompt.open_chat`) and calls `send()`. `send()` returns
-  false when nothing was sent (empty input or a run in flight).
+  false when nothing was sent (empty input or a run in flight). While the
+  chat runs, `ask()` appends `{prompt, origin_win, ref}` to `chat.queue` instead
+  (winbar `N queued`); `on_done` sends the next one (`send_queued`, with
+  `queued = true`: no `M.current` switch, no `stopinsert`), but after a
+  cancel (`chat.cancelled`), a run without a result or an `is_error` result the queue goes back
+  below the separator as the draft (`unqueue_to_draft`). The chat buffer's
+  own `<CR>` still refuses while running: its input area does not exist
+  until the run ends.
   `target_win()` picks the non-chat, non-floating window display tools act on;
   it prefers `chat.origin_win`, which `ask`/`send` record explicitly. Only
   windows whose buffer has an empty `buftype` qualify, so NERDTree, terminals,
@@ -117,7 +126,7 @@ All modules live in `lua/harner/`:
   sends via `chat.ask` and returns focus to the window it was opened from,
   `<S-CR>`/`<C-CR>` insert a newline, `<Esc>`/`q`/`<C-c>` close keeping the
   text as a draft for the next open, leaving the float (WinLeave) closes it.
-  While a run is in flight `<CR>` warns and keeps the popup open.
+  While a run is in flight `<CR>` queues the prompt (see `chat.ask`).
   `selection_ref()` / `ref_line(ref)` build the selection reference;
   `open({ ref = ... })` attaches one (shown in the title, appended on send,
   dropped on close, not part of the kept draft).

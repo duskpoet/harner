@@ -174,7 +174,7 @@ function M.setup(opts)
 			if ref then
 				text = text .. "\n\n" .. prompt().ref_line(ref)
 			end
-			chat().ask(text)
+			chat().ask(text, nil, ref)
 		else
 			prompt().open({ ref = ref })
 		end

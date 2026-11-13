@@ -25,6 +25,9 @@ local SEP = string.rep("─", 40)
 ---@field tool_line integer|nil 1-based line of the last tool note, amended when the input arrives
 ---@field auto boolean auto mode (fewer confirms, see auto.lua)
 ---@field last_prompt string|nil the user's latest message (classifier context)
+---@field ref HarnerRef|nil selection referenced by the latest message (get_selection)
+---@field queue {prompt:string, origin_win:integer, ref:HarnerRef|nil}[]|nil prompts asked while a run was in flight
+---@field cancelled boolean|nil the run in flight was cancelled (on_done drops the queue into the draft)
 ---@field state string|nil last winbar state
 ---@field grants table|nil `a` approvals (tools.lua)
 ---@field context {used:integer, window:integer|nil, model:string|nil}|nil tokens in the session's context
@@ -187,6 +190,9 @@ local function set_winbar(chat, state)
 	local win = chat_win(chat)
 	if win then
 		local badge = chat.auto and " %#DiagnosticWarn#AUTO%*" or ""
+		if chat.queue and #chat.queue > 0 then
+			badge = string.format(" · %%#DiagnosticInfo#%d queued%%*", #chat.queue) .. badge
+		end
 		vim.wo[win].winhighlight = "WinBar:HarnerWinBar,WinBarNC:HarnerWinBarNC"
 		vim.wo[win].winbar = string.format(
 			"%%#Title# harner #%d %%* %s%s%s",
@@ -435,20 +441,54 @@ function M.on_tool_done(_, id)
 	end
 end
 
----True while the current chat has a request in flight.
-function M.busy()
-	local chat = M.current and M.chats[M.current]
-	return chat ~= nil and chat.run ~= nil
+local send_chat -- forward
+
+---Replace the pending input (everything below the last separator) with `text`.
+---@param chat HarnerChat
+---@param text string
+local function set_draft(chat, text)
+	local buf = buf_of(chat)
+	vim.api.nvim_buf_set_lines(buf, last_sep_index(buf) or 0, -1, false, vim.split(text, "\n", { plain = true }))
+end
+
+---Put the queued prompts back below the last separator as the draft, so a
+---cancelled or failed run does not lose them.
+---@param chat HarnerChat
+local function unqueue_to_draft(chat)
+	local q = chat.queue or {}
+	chat.queue = {}
+	if #q == 0 then
+		return
+	end
+	set_draft(chat, table.concat(vim.tbl_map(function(e)
+		return e.prompt
+	end, q), "\n\n"))
+	M.refresh_winbar(chat) -- drop the "N queued" badge drawn before the queue emptied
+	vim.notify(("harner: %d queued message(s) moved back to the chat input"):format(#q), vim.log.levels.INFO)
+end
+
+---Start the next queued prompt of a chat, if any.
+---@param chat HarnerChat
+local function send_queued(chat)
+	local e = chat.queue and table.remove(chat.queue, 1)
+	if not e then
+		return
+	end
+	set_draft(chat, e.prompt)
+	-- started from a callback: don't steal the current chat or leave insert mode
+	send_chat(chat, { origin_win = e.origin_win, ref = e.ref, queued = true })
 end
 
 ---Send the pending input of a chat.
 ---@param chat HarnerChat
----@param opts { origin_win?: integer }|nil
+---@param opts { origin_win?: integer, ref?: HarnerRef, queued?: boolean }|nil
 ---@return boolean sent
-local function send_chat(chat, opts)
+send_chat = function(chat, opts)
 	opts = opts or {}
 	if chat.run then
-		vim.notify("harner: still running, <C-c> to cancel", vim.log.levels.WARN)
+		local key = (require("harner").config.keys or {}).ask
+		local via = type(key) == "string" and key ~= "" and key or ":HarnerAsk"
+		vim.notify("harner: still running, <C-c> to cancel (or queue with " .. via .. ")", vim.log.levels.WARN)
 		return false
 	end
 	local buf = buf_of(chat)
@@ -468,8 +508,13 @@ local function send_chat(chat, opts)
 	if usable_origin(origin) then
 		chat.origin_win = origin
 	end
-	M.current = chat.id
+	if not opts.queued then
+		M.current = chat.id
+	end
 	chat.last_prompt = prompt -- context for the auto-mode classifier
+	-- what get_selection reads for this message; a prompt typed or restored
+	-- into the chat buffer carries it only as its "Selection:" line
+	chat.ref = opts.ref or require("harner.prompt").parse_ref(prompt)
 	if not chat.title then
 		chat.title = vim.split(prompt, "\n", { plain = true })[1]:sub(1, 60)
 	end
@@ -478,7 +523,9 @@ local function send_chat(chat, opts)
 	vim.list_extend(out, vim.split(prompt, "\n", { plain = true }))
 	vim.list_extend(out, { "", "## Claude", "", "" })
 	vim.api.nvim_buf_set_lines(buf, start, -1, false, out)
-	vim.cmd("stopinsert")
+	if not opts.queued then
+		vim.cmd("stopinsert")
+	end
 	scroll_to_end(chat)
 	set_winbar(chat, "thinking…")
 
@@ -528,6 +575,16 @@ local function send_chat(chat, opts)
 			if win and win == vim.api.nvim_get_current_win() then
 				vim.api.nvim_win_set_cursor(win, { vim.api.nvim_buf_line_count(buf), 0 })
 			end
+			-- a cancelled or failed run (no result, or an error result such as
+			-- an API/auth error) does not start the queue: the queued prompts
+			-- become the draft instead
+			local cancelled = chat.cancelled
+			chat.cancelled = nil
+			if cancelled or not result or result.is_error then
+				unqueue_to_draft(chat)
+			else
+				send_queued(chat)
+			end
 		end,
 	})
 	return true
@@ -545,6 +602,7 @@ end
 ---@param chat HarnerChat
 local function cancel_chat(chat)
 	if chat.run then
+		chat.cancelled = true
 		require("harner.tools").cancel_chat("cancelled by the user", chat.id)
 		require("harner.runner").cancel(chat.run)
 		append_lines(chat, { "", "> cancelled" })
@@ -740,28 +798,31 @@ end
 ---Send `prompt` to the current chat without typing into the chat buffer.
 ---Used by the input popup and :HarnerAsk. Replaces any draft below the
 ---separator. Opens the chat window (unfocused) if it is hidden so the answer
----is visible.
+---is visible. While a run is in flight the prompt is queued and sent when
+---the run finishes (a cancel or failure moves the queue back to the draft).
 ---@param prompt string
 ---@param origin_win integer|nil window the question is about
----@return boolean sent
-function M.ask(prompt, origin_win)
+---@param ref HarnerRef|nil selection the prompt's "Selection:" line points at
+---@return boolean sent sent or queued
+function M.ask(prompt, origin_win, ref)
 	prompt = vim.trim(prompt or "")
 	if prompt == "" then
 		return false
 	end
 	local chat = M.ensure()
-	if chat.run then
-		vim.notify("harner: still running, <leader>hx to cancel", vim.log.levels.WARN)
-		return false
-	end
-	local buf = buf_of(chat)
-	local sep_idx = last_sep_index(buf)
-	vim.api.nvim_buf_set_lines(buf, sep_idx or 0, -1, false, vim.split(prompt, "\n", { plain = true }))
 	origin_win = origin_win or vim.api.nvim_get_current_win()
+	if chat.run then
+		chat.queue = chat.queue or {}
+		table.insert(chat.queue, { prompt = prompt, origin_win = origin_win, ref = ref })
+		M.refresh_winbar(chat)
+		vim.notify(("harner: queued (%d waiting)"):format(#chat.queue), vim.log.levels.INFO)
+		return true
+	end
+	set_draft(chat, prompt)
 	if require("harner").config.prompt.open_chat then
 		open_win(chat, false)
 	end
-	return send_chat(chat, { origin_win = origin_win })
+	return send_chat(chat, { origin_win = origin_win, ref = ref })
 end
 
 ---Start a fresh chat with a new session; the old ones stay (`:HarnerChats`).
